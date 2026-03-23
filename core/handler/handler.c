@@ -1,3 +1,21 @@
+/*
+ * handler.c — JSON-RPC command dispatcher (UDP edition)
+ *
+ * Dispatches incoming JSON-RPC requests to drone_ctrl_* functions
+ * and sends the response back to the originating UDP peer.
+ *
+ * Supported methods:
+ *   system.ping
+ *   drone.get_telemetry      drone.get_battery_info
+ *   drone.get_gimbal_angle   drone.get_camera_state
+ *   drone.get_rtk_status
+ *   drone.set_rth_altitude   drone.set_gimbal_angle
+ *   drone.set_camera_mode    drone.set_camera_zoom
+ *   drone.set_home_location  drone.set_obstacle_avoidance
+ *   drone.shoot_photo        drone.start_recording
+ *   drone.stop_recording
+ */
+
 #include "handler.h"
 #include "../proto/rpc.h"
 #include "../log/log.h"
@@ -6,17 +24,18 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <arpa/inet.h>
 #include <time.h>
 
 #define TAG "core.handler"
 
-static TcpServer *g_srv = NULL;
+static UdpServer *g_srv = NULL;
 
-void handler_set_server(TcpServer *srv) {
+void handler_set_server(UdpServer *srv) {
     g_srv = srv;
 }
 
-/* Uptime reference (set at first call) */
+/* ── Uptime ───────────────────────────────────────────────────────────────── */
 static struct timespec g_start;
 static int g_started = 0;
 
@@ -31,34 +50,40 @@ static uint64_t uptime_ms(void) {
          + (uint64_t)(now.tv_nsec - g_start.tv_nsec) / 1000000ULL;
 }
 
-/* ── Helper: send result or error ─────────────────────────────────────────── */
-static void send_result(TcpServer *srv, int fd, int id, const char *result_json) {
+/* ── Reply helpers ────────────────────────────────────────────────────────── */
+static void send_result(const struct sockaddr_in *peer, int id,
+                        const char *result_json) {
     char buf[DRONE_MAX_MSG_LEN];
-    rpc_build_result(buf, sizeof(buf), id, result_json);
-    tcp_server_send(srv, fd, buf);
+    int n = rpc_build_result(buf, sizeof(buf), id, result_json);
+    if (n > 0)
+        udp_server_send(g_srv, peer, buf, (size_t)n);
 }
 
-static void send_error(TcpServer *srv, int fd, int id, const char *msg) {
+static void send_error(const struct sockaddr_in *peer, int id,
+                       const char *msg) {
     char buf[DRONE_MAX_MSG_LEN];
-    rpc_build_error(buf, sizeof(buf), id, msg);
-    tcp_server_send(srv, fd, buf);
+    int n = rpc_build_error(buf, sizeof(buf), id, msg);
+    if (n > 0)
+        udp_server_send(g_srv, peer, buf, (size_t)n);
 }
 
-/* ── system.ping ──────────────────────────────────────────────────────────── */
-static void h_system_ping(TcpServer *srv, int fd, int id) {
+/* ══════════════════════════════════════════════════════════════════════════
+ * Method handlers
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static void h_system_ping(const struct sockaddr_in *peer, int id) {
     char result[128];
     snprintf(result, sizeof(result),
              "{\"pong\":true,\"uptime_ms\":%llu}",
              (unsigned long long)uptime_ms());
-    send_result(srv, fd, id, result);
+    send_result(peer, id, result);
 }
 
-/* ── drone.get_telemetry ──────────────────────────────────────────────────── */
-static void h_drone_get_telemetry(TcpServer *srv, int fd, int id) {
+/* ── GET: telemetry ───────────────────────────────────────────────────────── */
+static void h_drone_get_telemetry(const struct sockaddr_in *peer, int id) {
     DroneTelemetry t;
-    DroneError err = drone_get_telemetry(&t);
-    if (err != DRONE_OK) {
-        send_error(srv, fd, id, "failed to read telemetry");
+    if (drone_get_telemetry(&t) != DRONE_OK) {
+        send_error(peer, id, "failed to read telemetry");
         return;
     }
     char result[512];
@@ -79,15 +104,14 @@ static void h_drone_get_telemetry(TcpServer *srv, int fd, int id) {
         t.battery_pct, t.battery_mv,
         t.gps_sats, t.gps_fix,
         t.flight_status, t.motors_on ? "true" : "false");
-    send_result(srv, fd, id, result);
+    send_result(peer, id, result);
 }
 
-/* ── drone.get_battery_info ───────────────────────────────────────────────── */
-static void h_drone_get_battery_info(TcpServer *srv, int fd, int id) {
+/* ── GET: battery ─────────────────────────────────────────────────────────── */
+static void h_drone_get_battery_info(const struct sockaddr_in *peer, int id) {
     DroneBatteryInfo b;
-    DroneError err = drone_get_battery_info(&b);
-    if (err != DRONE_OK) {
-        send_error(srv, fd, id, "failed to read battery info");
+    if (drone_get_battery_info(&b) != DRONE_OK) {
+        send_error(peer, id, "failed to read battery info");
         return;
     }
     char result[256];
@@ -96,45 +120,42 @@ static void h_drone_get_battery_info(TcpServer *srv, int fd, int id) {
         "\"remaining_pct\":%u,\"temperature_dc\":%d,\"cycle_count\":%u}",
         b.voltage_mv, b.current_ma,
         b.remaining_pct, b.temperature_dc, b.cycle_count);
-    send_result(srv, fd, id, result);
+    send_result(peer, id, result);
 }
 
-/* ── drone.get_gimbal_angle ───────────────────────────────────────────────── */
-static void h_drone_get_gimbal_angle(TcpServer *srv, int fd, int id) {
+/* ── GET: gimbal ──────────────────────────────────────────────────────────── */
+static void h_drone_get_gimbal_angle(const struct sockaddr_in *peer, int id) {
     DroneGimbalAngle g;
-    DroneError err = drone_get_gimbal_angle(&g);
-    if (err != DRONE_OK) {
-        send_error(srv, fd, id, "failed to read gimbal angle");
+    if (drone_get_gimbal_angle(&g) != DRONE_OK) {
+        send_error(peer, id, "failed to read gimbal angle");
         return;
     }
     char result[128];
     snprintf(result, sizeof(result),
              "{\"pitch\":%.2f,\"roll\":%.2f,\"yaw\":%.2f}",
              g.pitch, g.roll, g.yaw);
-    send_result(srv, fd, id, result);
+    send_result(peer, id, result);
 }
 
-/* ── drone.get_camera_state ───────────────────────────────────────────────── */
-static void h_drone_get_camera_state(TcpServer *srv, int fd, int id) {
+/* ── GET: camera state ────────────────────────────────────────────────────── */
+static void h_drone_get_camera_state(const struct sockaddr_in *peer, int id) {
     DroneCameraState c;
-    DroneError err = drone_get_camera_state(&c);
-    if (err != DRONE_OK) {
-        send_error(srv, fd, id, "failed to read camera state");
+    if (drone_get_camera_state(&c) != DRONE_OK) {
+        send_error(peer, id, "failed to read camera state");
         return;
     }
     char result[128];
     snprintf(result, sizeof(result),
              "{\"mode\":%d,\"is_recording\":%s,\"zoom_factor\":%.2f}",
              c.mode, c.is_recording ? "true" : "false", c.zoom_factor);
-    send_result(srv, fd, id, result);
+    send_result(peer, id, result);
 }
 
-/* ── drone.get_rtk_status ─────────────────────────────────────────────────── */
-static void h_drone_get_rtk_status(TcpServer *srv, int fd, int id) {
+/* ── GET: RTK ─────────────────────────────────────────────────────────────── */
+static void h_drone_get_rtk_status(const struct sockaddr_in *peer, int id) {
     DroneRtkStatus r;
-    DroneError err = drone_get_rtk_status(&r);
-    if (err != DRONE_OK) {
-        send_error(srv, fd, id, "failed to read RTK status");
+    if (drone_get_rtk_status(&r) != DRONE_OK) {
+        send_error(peer, id, "failed to read RTK status");
         return;
     }
     char result[256];
@@ -144,62 +165,62 @@ static void h_drone_get_rtk_status(TcpServer *srv, int fd, int id) {
         r.enabled ? "true" : "false",
         r.fix_type, r.satellites,
         r.lat, r.lon, r.alt_m);
-    send_result(srv, fd, id, result);
+    send_result(peer, id, result);
 }
 
-/* ── drone.set_rth_altitude ───────────────────────────────────────────────── */
-static void h_drone_set_rth_altitude(TcpServer *srv, int fd, int id,
+/* ── SET: RTH altitude ────────────────────────────────────────────────────── */
+static void h_drone_set_rth_altitude(const struct sockaddr_in *peer, int id,
                                       json_object *params) {
     float alt_m = (float)rpc_param_double(params, "altitude_m", -1.0);
     if (alt_m < 0) {
-        send_error(srv, fd, id, "missing param: altitude_m");
+        send_error(peer, id, "missing param: altitude_m");
         return;
     }
     DroneError err = drone_set_rth_altitude(alt_m);
-    if (err != DRONE_OK) send_error(srv, fd, id, "PSDK set rth altitude failed");
-    else                  send_result(srv, fd, id, NULL);
+    if (err != DRONE_OK) send_error(peer, id, "PSDK set rth altitude failed");
+    else                  send_result(peer, id, NULL);
 }
 
-/* ── drone.set_gimbal_angle ───────────────────────────────────────────────── */
-static void h_drone_set_gimbal_angle(TcpServer *srv, int fd, int id,
+/* ── SET: gimbal angle ────────────────────────────────────────────────────── */
+static void h_drone_set_gimbal_angle(const struct sockaddr_in *peer, int id,
                                       json_object *params) {
     DroneGimbalAngle a;
     a.pitch = (float)rpc_param_double(params, "pitch", 0.0);
     a.roll  = (float)rpc_param_double(params, "roll",  0.0);
     a.yaw   = (float)rpc_param_double(params, "yaw",   0.0);
     DroneError err = drone_set_gimbal_angle(&a);
-    if (err != DRONE_OK) send_error(srv, fd, id, "PSDK set gimbal angle failed");
-    else                  send_result(srv, fd, id, NULL);
+    if (err != DRONE_OK) send_error(peer, id, "PSDK set gimbal angle failed");
+    else                  send_result(peer, id, NULL);
 }
 
-/* ── drone.set_camera_mode ────────────────────────────────────────────────── */
-static void h_drone_set_camera_mode(TcpServer *srv, int fd, int id,
+/* ── SET: camera mode ─────────────────────────────────────────────────────── */
+static void h_drone_set_camera_mode(const struct sockaddr_in *peer, int id,
                                      json_object *params) {
     int mode = rpc_param_int(params, "mode", -1);
     if (mode < 0) {
-        send_error(srv, fd, id, "missing param: mode (0=photo, 1=video)");
+        send_error(peer, id, "missing param: mode (0=photo, 1=video)");
         return;
     }
     DroneError err = drone_set_camera_mode((CameraMode)mode);
-    if (err != DRONE_OK) send_error(srv, fd, id, "PSDK set camera mode failed");
-    else                  send_result(srv, fd, id, NULL);
+    if (err != DRONE_OK) send_error(peer, id, "PSDK set camera mode failed");
+    else                  send_result(peer, id, NULL);
 }
 
-/* ── drone.set_camera_zoom ────────────────────────────────────────────────── */
-static void h_drone_set_camera_zoom(TcpServer *srv, int fd, int id,
+/* ── SET: camera zoom ─────────────────────────────────────────────────────── */
+static void h_drone_set_camera_zoom(const struct sockaddr_in *peer, int id,
                                      json_object *params) {
     float zoom = (float)rpc_param_double(params, "zoom_factor", -1.0);
     if (zoom < 1.0f) {
-        send_error(srv, fd, id, "missing or invalid param: zoom_factor (>= 1.0)");
+        send_error(peer, id, "missing or invalid param: zoom_factor (>= 1.0)");
         return;
     }
     DroneError err = drone_set_camera_zoom(zoom);
-    if (err != DRONE_OK) send_error(srv, fd, id, "PSDK set camera zoom failed");
-    else                  send_result(srv, fd, id, NULL);
+    if (err != DRONE_OK) send_error(peer, id, "PSDK set camera zoom failed");
+    else                  send_result(peer, id, NULL);
 }
 
-/* ── drone.set_home_location ──────────────────────────────────────────────── */
-static void h_drone_set_home_location(TcpServer *srv, int fd, int id,
+/* ── SET: home location ───────────────────────────────────────────────────── */
+static void h_drone_set_home_location(const struct sockaddr_in *peer, int id,
                                        json_object *params) {
     DroneHomeLocation loc;
     loc.lat   = rpc_param_double(params, "lat", 999.0);
@@ -207,106 +228,106 @@ static void h_drone_set_home_location(TcpServer *srv, int fd, int id,
     loc.alt_m = (float)rpc_param_double(params, "alt_m", 0.0);
     if (loc.lat > 90.0 || loc.lat < -90.0 ||
         loc.lon > 180.0 || loc.lon < -180.0) {
-        send_error(srv, fd, id, "missing or invalid params: lat, lon");
+        send_error(peer, id, "missing or invalid params: lat, lon");
         return;
     }
     DroneError err = drone_set_home_location(&loc);
-    if (err != DRONE_OK) send_error(srv, fd, id, "PSDK set home location failed");
-    else                  send_result(srv, fd, id, NULL);
+    if (err != DRONE_OK) send_error(peer, id, "PSDK set home location failed");
+    else                  send_result(peer, id, NULL);
 }
 
-/* ── drone.set_obstacle_avoidance ─────────────────────────────────────────── */
-static void h_drone_set_obstacle_avoidance(TcpServer *srv, int fd, int id,
-                                            json_object *params) {
+/* ── SET: obstacle avoidance ──────────────────────────────────────────────── */
+static void h_drone_set_obstacle_avoidance(const struct sockaddr_in *peer,
+                                            int id, json_object *params) {
     int mode = rpc_param_int(params, "mode", -1);
     if (mode < 0) {
-        send_error(srv, fd, id,
-                   "missing param: mode (0=off, 1=on, 2=brake)");
+        send_error(peer, id, "missing param: mode (0=off, 1=on, 2=brake)");
         return;
     }
     DroneError err = drone_set_obstacle_avoidance((ObstacleAvoidMode)mode);
-    if (err != DRONE_OK) send_error(srv, fd, id, "PSDK set obstacle avoidance failed");
-    else                  send_result(srv, fd, id, NULL);
+    if (err != DRONE_OK) send_error(peer, id, "PSDK set obstacle avoidance failed");
+    else                  send_result(peer, id, NULL);
 }
 
-/* ── drone.shoot_photo ────────────────────────────────────────────────────── */
-static void h_drone_shoot_photo(TcpServer *srv, int fd, int id) {
+/* ── Actions ──────────────────────────────────────────────────────────────── */
+static void h_drone_shoot_photo(const struct sockaddr_in *peer, int id) {
     DroneError err = drone_shoot_photo();
-    if (err != DRONE_OK) send_error(srv, fd, id, "PSDK shoot photo failed");
-    else                  send_result(srv, fd, id, NULL);
+    if (err != DRONE_OK) send_error(peer, id, "PSDK shoot photo failed");
+    else                  send_result(peer, id, NULL);
 }
 
-/* ── drone.start_recording ────────────────────────────────────────────────── */
-static void h_drone_start_recording(TcpServer *srv, int fd, int id) {
+static void h_drone_start_recording(const struct sockaddr_in *peer, int id) {
     DroneError err = drone_start_recording();
-    if (err != DRONE_OK) send_error(srv, fd, id, "PSDK start recording failed");
-    else                  send_result(srv, fd, id, NULL);
+    if (err != DRONE_OK) send_error(peer, id, "PSDK start recording failed");
+    else                  send_result(peer, id, NULL);
 }
 
-/* ── drone.stop_recording ─────────────────────────────────────────────────── */
-static void h_drone_stop_recording(TcpServer *srv, int fd, int id) {
+static void h_drone_stop_recording(const struct sockaddr_in *peer, int id) {
     DroneError err = drone_stop_recording();
-    if (err != DRONE_OK) send_error(srv, fd, id, "PSDK stop recording failed");
-    else                  send_result(srv, fd, id, NULL);
+    if (err != DRONE_OK) send_error(peer, id, "PSDK stop recording failed");
+    else                  send_result(peer, id, NULL);
 }
 
-/* ── Dispatch table ───────────────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════════════
+ * Main dispatch
+ * ══════════════════════════════════════════════════════════════════════════ */
 
-int handle_rpc(int client_fd, const char *line, size_t len, void *userdata) {
+int handle_rpc(const struct sockaddr_in *peer,
+               const char *line, size_t len, void *userdata) {
     (void)userdata;
-    TcpServer *srv = g_srv;
     (void)len;
 
-    log_debug(TAG, "fd=%d rx: %s", client_fd, line);
+    log_debug(TAG, "rx from %s:%d: %s",
+              inet_ntoa(peer->sin_addr), ntohs(peer->sin_port), line);
 
     RpcRequest req;
     if (rpc_parse(line, &req) != 0) {
-        /* Can't respond without an id — just log and carry on */
-        log_warn(TAG, "fd=%d: invalid JSON-RPC, ignoring", client_fd);
+        log_warn(TAG, "invalid JSON-RPC from %s — ignoring",
+                 inet_ntoa(peer->sin_addr));
         return 0;
     }
 
-    const char *m = req.method;
-    int id        = req.id;
-    json_object *p = req.params;
+    const char  *m = req.method;
+    int          id = req.id;
+    json_object *p  = req.params;
 
     /* system */
     if      (!strcmp(m, "system.ping"))
-        h_system_ping(srv, client_fd, id);
+        h_system_ping(peer, id);
     /* get */
     else if (!strcmp(m, "drone.get_telemetry"))
-        h_drone_get_telemetry(srv, client_fd, id);
+        h_drone_get_telemetry(peer, id);
     else if (!strcmp(m, "drone.get_battery_info"))
-        h_drone_get_battery_info(srv, client_fd, id);
+        h_drone_get_battery_info(peer, id);
     else if (!strcmp(m, "drone.get_gimbal_angle"))
-        h_drone_get_gimbal_angle(srv, client_fd, id);
+        h_drone_get_gimbal_angle(peer, id);
     else if (!strcmp(m, "drone.get_camera_state"))
-        h_drone_get_camera_state(srv, client_fd, id);
+        h_drone_get_camera_state(peer, id);
     else if (!strcmp(m, "drone.get_rtk_status"))
-        h_drone_get_rtk_status(srv, client_fd, id);
+        h_drone_get_rtk_status(peer, id);
     /* set */
     else if (!strcmp(m, "drone.set_rth_altitude"))
-        h_drone_set_rth_altitude(srv, client_fd, id, p);
+        h_drone_set_rth_altitude(peer, id, p);
     else if (!strcmp(m, "drone.set_gimbal_angle"))
-        h_drone_set_gimbal_angle(srv, client_fd, id, p);
+        h_drone_set_gimbal_angle(peer, id, p);
     else if (!strcmp(m, "drone.set_camera_mode"))
-        h_drone_set_camera_mode(srv, client_fd, id, p);
+        h_drone_set_camera_mode(peer, id, p);
     else if (!strcmp(m, "drone.set_camera_zoom"))
-        h_drone_set_camera_zoom(srv, client_fd, id, p);
+        h_drone_set_camera_zoom(peer, id, p);
     else if (!strcmp(m, "drone.set_home_location"))
-        h_drone_set_home_location(srv, client_fd, id, p);
+        h_drone_set_home_location(peer, id, p);
     else if (!strcmp(m, "drone.set_obstacle_avoidance"))
-        h_drone_set_obstacle_avoidance(srv, client_fd, id, p);
+        h_drone_set_obstacle_avoidance(peer, id, p);
     /* actions */
     else if (!strcmp(m, "drone.shoot_photo"))
-        h_drone_shoot_photo(srv, client_fd, id);
+        h_drone_shoot_photo(peer, id);
     else if (!strcmp(m, "drone.start_recording"))
-        h_drone_start_recording(srv, client_fd, id);
+        h_drone_start_recording(peer, id);
     else if (!strcmp(m, "drone.stop_recording"))
-        h_drone_stop_recording(srv, client_fd, id);
+        h_drone_stop_recording(peer, id);
     else {
-        log_warn(TAG, "fd=%d unknown method: %s", client_fd, m);
-        send_error(srv, client_fd, id, "method not found");
+        log_warn(TAG, "unknown method: %s", m);
+        send_error(peer, id, "method not found");
     }
 
     rpc_request_free(&req);

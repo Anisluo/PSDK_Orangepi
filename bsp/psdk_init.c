@@ -1,13 +1,16 @@
 /*
- * psdk_init.c — PSDK initialisation and shutdown
+ * psdk_init.c — PSDK 3.9.2 initialisation and shutdown
  *
- * PSDK DjiCore_Init() requires:
- *   1. HAL handlers registered (psdk_hal_register)
- *   2. App info: developer account hash, app ID, app key, app license,
- *      firmware version, alias name — all from DJI Developer Portal.
- *      Fill these in dji_sdk_app_info.h (not committed to git).
+ * Call order (PSDK_REAL=1):
+ *   psdk_hal_register()        — registers OSAL, UART, Network, Socket, FS
+ *   DjiCore_Init()             — initialises SDK with app credentials
+ *   DjiCore_SetAlias()         — payload alias shown in DJI Pilot
+ *   DjiCore_SetFirmwareVersion()
+ *   DjiCore_SetSerialNumber()
+ *   DjiCore_ApplicationStart() — completes handshake with aircraft
  *
- * Reference: PSDK samples/sample_c/module_sample/utils/dji_sdk_app_info.h
+ * App credentials go in bsp/dji_sdk_app_info.h (not committed to git).
+ * Get your credentials at https://developer.dji.com/user/apps/
  */
 
 #include "psdk_init.h"
@@ -16,58 +19,58 @@
 
 #define TAG "bsp.init"
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * REAL PSDK init
+ * ══════════════════════════════════════════════════════════════════════════ */
 #ifdef PSDK_REAL
-/* ─────────────────────────────────────────────────────────────────────────
- * Real PSDK init
- * ───────────────────────────────────────────────────────────────────────── */
 
+#include <string.h>
 #include <dji_core.h>
-#include <dji_logger.h>
-#include "dji_sdk_app_info.h"   /* developer-specific, not in repo */
-
-static T_DjiReturnCode psdk_log_callback(const uint8_t *data, uint16_t data_len) {
-    /* Route PSDK internal log to our logger */
-    char buf[512];
-    size_t copy = data_len < sizeof(buf) - 1 ? data_len : sizeof(buf) - 1;
-    memcpy(buf, data, copy);
-    buf[copy] = '\0';
-    log_debug("bsp.psdk", "%s", buf);
-    return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
-}
+#include "dji_sdk_app_info.h"   /* fill in your credentials here */
 
 int psdk_init(void) {
+    /* Step 1: register platform handlers */
     if (psdk_hal_register() != 0) return -1;
 
-    T_DjiUserInfo user_info = {
-        .appName            = USER_APP_NAME,
-        .appId              = USER_APP_ID,
-        .appKey             = USER_APP_KEY,
-        .appLicense         = USER_APP_LICENSE,
-        .developerAccountStr= USER_DEVELOPER_ACCOUNT,
-        .baudRate           = USER_BAUD_RATE,
-    };
+    /* Step 2: initialise core with app info */
+    T_DjiUserInfo user_info;
+    memset(&user_info, 0, sizeof(user_info));
+    strncpy(user_info.appName,            USER_APP_NAME,        DJI_SDK_APP_NAME_MAX_SIZE - 1);
+    strncpy(user_info.appId,              USER_APP_ID,          DJI_SDK_APP_ID_MAX_SIZE - 1);
+    strncpy(user_info.appKey,             USER_APP_KEY,         DJI_SDK_APP_KEY_MAX_SIZE - 1);
+    strncpy(user_info.appLicense,         USER_APP_LICENSE,     DJI_SDK_APP_LICENSE_MAX_SIZE - 1);
+    strncpy(user_info.developerAccountStr,USER_DEVELOPER_ACCOUNT, DJI_SDK_DEVELOPER_ACCOUNT_MAX_SIZE - 1);
+    strncpy(user_info.baudRate,           USER_BAUD_RATE,       DJI_SDK_BAUD_RATE_MAX_SIZE - 1);
 
     T_DjiReturnCode rc = DjiCore_Init(&user_info);
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         log_error(TAG, "DjiCore_Init failed (0x%08X)", rc);
         return -1;
     }
+    log_info(TAG, "DjiCore_Init OK");
 
-    /* Redirect PSDK internal log */
-    DjiLogger_AddConsole(DJI_LOG_LEVEL_DEBUG, DJI_LOG_COLOR_OFF,
-                         false, psdk_log_callback);
-
+    /* Step 3: optional metadata */
     rc = DjiCore_SetAlias("PSDK-Bridge");
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS)
-        log_warn(TAG, "DjiCore_SetAlias failed (non-fatal)");
+        log_warn(TAG, "DjiCore_SetAlias failed (non-fatal, 0x%08X)", rc);
 
+    T_DjiFirmwareVersion fw = { .majorVersion = 1, .minorVersion = 0,
+                                 .modifyVersion = 0, .debugVersion = 0 };
+    rc = DjiCore_SetFirmwareVersion(fw);
+    if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS)
+        log_warn(TAG, "DjiCore_SetFirmwareVersion failed (non-fatal, 0x%08X)", rc);
+
+    rc = DjiCore_SetSerialNumber("OPSDK00000001");
+    if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS)
+        log_warn(TAG, "DjiCore_SetSerialNumber failed (non-fatal, 0x%08X)", rc);
+
+    /* Step 4: start application — completes E-Port handshake */
     rc = DjiCore_ApplicationStart();
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         log_error(TAG, "DjiCore_ApplicationStart failed (0x%08X)", rc);
         return -1;
     }
-
-    log_info(TAG, "PSDK initialised and application started");
+    log_info(TAG, "PSDK application started — E-Port handshake complete");
     return 0;
 }
 
@@ -76,14 +79,14 @@ void psdk_deinit(void) {
     log_info(TAG, "PSDK de-initialised");
 }
 
-#else /* PSDK_REAL not defined */
-/* ─────────────────────────────────────────────────────────────────────────
- * Stub init
- * ───────────────────────────────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════════════
+ * STUB (no PSDK hardware)
+ * ══════════════════════════════════════════════════════════════════════════ */
+#else
 
 int psdk_init(void) {
     psdk_hal_register();
-    log_info(TAG, "PSDK stub init OK (no real SDK linked)");
+    log_info(TAG, "PSDK stub init OK (build with PSDK_REAL=1 for real hardware)");
     return 0;
 }
 

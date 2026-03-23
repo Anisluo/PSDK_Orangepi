@@ -1,16 +1,19 @@
 /*
- * main.c — PSDK bridge daemon entry point
+ * main.c — PSDK bridge daemon entry point (OrangePi Zero3)
  *
  * Startup sequence:
- *   1. Parse CLI args (--port, --log-level)
- *   2. Initialise PSDK (HAL + DjiCore)
- *   3. Initialise drone control subscriptions
- *   4. Start TCP server on mesh interface port
- *   5. Run epoll event loop until SIGINT/SIGTERM
+ *   1. Parse CLI args (--port, --bind-ip, --debug)
+ *   2. Initialise PSDK (HAL + DjiCore)           [BSP]
+ *   3. Initialise drone control subscriptions     [BSP]
+ *   4. Start UDP server                           [Core]
+ *   5. Poll loop until SIGINT/SIGTERM
  *   6. Graceful shutdown
  *
  * Usage:
- *   psdkd [--port <N>] [--debug]
+ *   psdkd [--port <N>] [--bind-ip <IP>] [--debug]
+ *
+ * Default port: DRONE_SERVER_PORT (5555)
+ * Protocol    : JSON-RPC over UDP (one datagram = one request/response)
  */
 
 #include <stdio.h>
@@ -20,7 +23,7 @@
 #include <unistd.h>
 
 #include "../core/log/log.h"
-#include "../core/server/tcp_server.h"
+#include "../core/server/udp_server.h"
 #include "../core/handler/handler.h"
 #include "../bsp/psdk_init.h"
 #include "../bsp/drone_ctrl.h"
@@ -38,21 +41,21 @@ static void sig_handler(int sig) {
 static void usage(const char *prog) {
     fprintf(stderr,
         "Usage: %s [OPTIONS]\n"
-        "  --port     <N>    TCP listen port       (default %d)\n"
-        "  --bind-ip  <IP>   IP address to bind to (default %s)\n"
+        "  --port     <N>    UDP listen port       (default %d)\n"
+        "  --bind-ip  <IP>   IP address to bind to (default 0.0.0.0)\n"
         "  --debug           Enable debug log level\n"
         "  --help            Show this help\n",
-        prog, DRONE_SERVER_PORT, DRONE_SERVER_BIND_IP);
+        prog, DRONE_SERVER_PORT);
 }
 
 int main(int argc, char *argv[]) {
-    unsigned short port    = DRONE_SERVER_PORT;
-    const char    *bind_ip = DRONE_SERVER_BIND_IP;
-    int            debug   = 0;
+    uint16_t    port    = DRONE_SERVER_PORT;
+    const char *bind_ip = "0.0.0.0";
+    int         debug   = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) {
-            port = (unsigned short)atoi(argv[++i]);
+            port = (uint16_t)atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--bind-ip") && i + 1 < argc) {
             bind_ip = argv[++i];
         } else if (!strcmp(argv[i], "--debug")) {
@@ -76,7 +79,6 @@ int main(int argc, char *argv[]) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGINT,  &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
-    signal(SIGPIPE, SIG_IGN);  /* ignore broken pipe from TCP clients */
 
     /* ── BSP: PSDK init ───────────────────────────────────────────────────── */
     if (psdk_init() != 0) {
@@ -91,10 +93,10 @@ int main(int argc, char *argv[]) {
         return 3;
     }
 
-    /* ── Core: TCP server ─────────────────────────────────────────────────── */
-    TcpServer *srv = tcp_server_create(bind_ip, port, handle_rpc, NULL);
+    /* ── Core: UDP server ─────────────────────────────────────────────────── */
+    UdpServer *srv = udp_server_create(bind_ip, port, handle_rpc, NULL);
     if (!srv) {
-        log_error(TAG, "tcp_server_create failed — aborting");
+        log_error(TAG, "udp_server_create failed — aborting");
         drone_ctrl_deinit();
         psdk_deinit();
         return 4;
@@ -102,15 +104,15 @@ int main(int argc, char *argv[]) {
     handler_set_server(srv);
 
     /* ── Main event loop ──────────────────────────────────────────────────── */
-    log_info(TAG, "ready — waiting for connections on port %u", port);
+    log_info(TAG, "ready — listening on UDP port %u", port);
 
     while (g_running) {
-        tcp_server_poll(srv, 500 /* ms */);
+        udp_server_poll(srv, 500 /* ms */);
     }
 
     /* ── Graceful shutdown ────────────────────────────────────────────────── */
     log_info(TAG, "shutting down...");
-    tcp_server_destroy(srv);
+    udp_server_destroy(srv);
     drone_ctrl_deinit();
     psdk_deinit();
     log_info(TAG, "bye");
