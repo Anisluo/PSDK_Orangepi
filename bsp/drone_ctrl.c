@@ -28,17 +28,16 @@
 #include <dji_gimbal_manager.h>
 #include <dji_camera_manager.h>
 #include <dji_flight_controller.h>
-#include <dji_battery.h>
-#include <dji_rtk_positioning.h>
 
 /* ── Subscription callback storage ───────────────────────────────────────── */
 
-static DjiFlightControllerQuaternion g_quat;
-static DjiFlightControllerVelocity   g_vel;
-static DjiFcSubscriptionPositionFused g_pos_fused;
-static DjiFcSubscriptionGpsDetails   g_gps;
-static DjiFcSubscriptionFlightStatus g_flight_status;
-static DjiFcSubscriptionBatteryInfo  g_battery;
+static T_DjiFcSubscriptionQuaternion       g_quat;
+static T_DjiFcSubscriptionVelocity         g_vel;
+static T_DjiFcSubscriptionPositionFused    g_pos_fused;
+static T_DjiFcSubscriptionGpsDetails       g_gps;
+static T_DjiFcSubscriptionFlightStatus     g_flight_status;
+static T_DjiFcSubscriptionWholeBatteryInfo g_battery;
+static T_DjiFcSubscriptionGimbalAngles     g_gimbal;
 
 /* ── Subscription callbacks ───────────────────────────────────────────────── */
 static T_DjiReturnCode cb_pos(const uint8_t *data, uint16_t len,
@@ -83,6 +82,13 @@ static T_DjiReturnCode cb_battery(const uint8_t *data, uint16_t len,
         memcpy(&g_battery, data, sizeof(g_battery));
     return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
 }
+static T_DjiReturnCode cb_gimbal(const uint8_t *data, uint16_t len,
+                                  const T_DjiDataTimestamp *ts) {
+    (void)ts;
+    if (len >= sizeof(g_gimbal))
+        memcpy(&g_gimbal, data, sizeof(g_gimbal));
+    return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+}
 
 /* ── Init / deinit ────────────────────────────────────────────────────────── */
 int drone_ctrl_init(void) {
@@ -112,6 +118,8 @@ int drone_ctrl_init(void) {
               cb_flight_status, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ);
     SUBSCRIBE(DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_INFO,
               cb_battery, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ);
+    SUBSCRIBE(DJI_FC_SUBSCRIPTION_TOPIC_GIMBAL_ANGLES,
+              cb_gimbal, DJI_DATA_SUBSCRIPTION_TOPIC_10_HZ);
 #undef SUBSCRIBE
 
     rc = DjiCameraManager_Init();
@@ -134,7 +142,7 @@ void drone_ctrl_deinit(void) {
 }
 
 /* ── Helpers: quaternion → heading ───────────────────────────────────────── */
-static float quat_to_heading(const DjiFlightControllerQuaternion *q) {
+static float quat_to_heading(const T_DjiFcSubscriptionQuaternion *q) {
     /* yaw from quaternion: atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z)) */
     float yaw = atan2f(2.0f * (q->q0 * q->q3 + q->q1 * q->q2),
                        1.0f - 2.0f * (q->q2 * q->q2 + q->q3 * q->q3));
@@ -149,15 +157,15 @@ DroneError drone_get_telemetry(DroneTelemetry *out) {
     out->lat         = g_pos_fused.latitude  * 180.0 / 3.14159265358979;
     out->lon         = g_pos_fused.longitude * 180.0 / 3.14159265358979;
     out->alt_msl_m   = g_pos_fused.altitude;
-    out->alt_rel_m   = g_pos_fused.relativeHeight;
+    out->alt_rel_m   = g_pos_fused.altitude; /* fused altitude, WGS84 */
     out->vx_ms       = g_vel.data.x;
     out->vy_ms       = g_vel.data.y;
     out->vz_ms       = g_vel.data.z;
     out->heading_deg = quat_to_heading(&g_quat);
-    out->battery_pct = g_battery.batteryCapacityPercent;
-    out->battery_mv  = g_battery.currentVoltage;
+    out->battery_pct = g_battery.percentage;
+    out->battery_mv  = (uint32_t)g_battery.voltage;
     out->gps_sats    = g_gps.gpsSatelliteNumberUsed;
-    out->gps_fix     = g_gps.gpsFixState;
+    out->gps_fix     = (uint8_t)g_gps.fixState;
     out->flight_status = g_flight_status;
     out->motors_on   = (g_flight_status > 0);
     return DRONE_OK;
@@ -165,22 +173,19 @@ DroneError drone_get_telemetry(DroneTelemetry *out) {
 
 DroneError drone_get_battery_info(DroneBatteryInfo *out) {
     memset(out, 0, sizeof(*out));
-    out->voltage_mv    = g_battery.currentVoltage;
-    out->current_ma    = g_battery.currentElectric;
-    out->remaining_pct = g_battery.batteryCapacityPercent;
+    out->voltage_mv    = (uint32_t)g_battery.voltage;
+    out->current_ma    = g_battery.current;
+    out->remaining_pct = g_battery.percentage;
     out->temperature_dc = 0; /* query DjiBattery_GetInfo if needed */
     out->cycle_count   = 0;
     return DRONE_OK;
 }
 
 DroneError drone_get_gimbal_angle(DroneGimbalAngle *out) {
-    T_DjiGimbalManagerRotation rot;
-    T_DjiReturnCode rc = DjiGimbalManager_GetAttitude(
-        DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, &rot);
-    if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) return DRONE_ERR_PSDK;
-    out->pitch = rot.pitch;
-    out->roll  = rot.roll;
-    out->yaw   = rot.yaw;
+    /* g_gimbal is T_DjiFcSubscriptionGimbalAngles = T_DjiVector3f (x=pitch, y=roll, z=yaw) */
+    out->pitch = g_gimbal.x;
+    out->roll  = g_gimbal.y;
+    out->yaw   = g_gimbal.z;
     return DRONE_OK;
 }
 
@@ -236,8 +241,10 @@ DroneError drone_set_camera_mode(CameraMode mode) {
 }
 
 DroneError drone_set_camera_zoom(float zoom_factor) {
-    T_DjiReturnCode rc = DjiCameraManager_SetOpticalZoomFactor(
-        DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, zoom_factor);
+    E_DjiCameraZoomDirection dir = (zoom_factor >= 1.0f)
+        ? DJI_CAMERA_ZOOM_DIRECTION_IN : DJI_CAMERA_ZOOM_DIRECTION_OUT;
+    T_DjiReturnCode rc = DjiCameraManager_SetOpticalZoomParam(
+        DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, dir, zoom_factor);
     return rc == DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS ? DRONE_OK : DRONE_ERR_PSDK;
 }
 
@@ -252,7 +259,7 @@ DroneError drone_set_home_location(const DroneHomeLocation *loc) {
 }
 
 DroneError drone_set_obstacle_avoidance(ObstacleAvoidMode mode) {
-    E_DjiFlightControllerObstacleAvoidingSwitch sw =
+    E_DjiFlightControllerObstacleAvoidanceEnableStatus sw =
         (mode == OBSTACLE_AVOID_CLOSE)
         ? DJI_FLIGHT_CONTROLLER_ENABLE_OBSTACLE_AVOIDANCE
         : DJI_FLIGHT_CONTROLLER_DISABLE_OBSTACLE_AVOIDANCE;

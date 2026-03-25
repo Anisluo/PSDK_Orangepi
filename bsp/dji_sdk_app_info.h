@@ -21,11 +21,11 @@ extern "C" {
 #endif
 
 /* ── Fill in your credentials below ─────────────────────────────────────── */
-#define USER_APP_NAME           "your_app_name"
-#define USER_APP_ID             "your_app_id"
-#define USER_APP_KEY            "your_app_key"
-#define USER_APP_LICENSE        "your_app_license"
-#define USER_DEVELOPER_ACCOUNT  "your_developer_account@email.com"
+#define USER_APP_NAME           "PSDKOrangepi"
+#define USER_APP_ID             "181392"
+#define USER_APP_KEY            "fe71d62687213a4401e6afe8cb746bd"
+#define USER_APP_LICENSE        "P0rYPnomRTA6aVK8Qp53G3saZlEmnlkGjvYzML2ieUmAARvvnXeiBtut8xHt40snA5TxoHL+TNB7ZHNPSlfFayCRDcvaMf5rJ5ce7SmFRGWrY+QGRPTUmnxoARcDfUhnmrmEQezQU91BWA94hWVj6GCrN2kMAZjRNiYJPgE8+Pj0A5qzvGIUp5ssXbNmNERl/p7TLwd4S7Ln8MkhcLhTScjrVgz5EsYFz0RU6WrCy95wNK33nEaDhfHDBZ/Iu55tTObqPOe3FTb+xDQ1DyYEkYVwIQnlbLHXUGdqeji1AndKZ4wltcEaXBIA9JiJ/Hj4Ij3bloKzpS9C3Z3PMLKYJA=="
+#define USER_DEVELOPER_ACCOUNT  "2010057290@qq.com"
 
 /* Baud rate for E-Port UART (DJI default: 460800) */
 #define USER_BAUD_RATE          "460800"

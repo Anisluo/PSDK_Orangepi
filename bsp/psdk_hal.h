@@ -18,12 +18,17 @@
  *   - Or USB bulk via /dev/usb-DJI (if using SKYPORT v2 USB mode)
  */
 
-/* PSDK HAL UART device and baud rate */
-#define PSDK_HAL_UART_DEV   "/dev/ttyUSB0"
+/* Keep log output aligned with the actual UART device passed from the build. */
+#ifdef LINUX_UART_DEV1
+#define PSDK_HAL_UART_DEV   LINUX_UART_DEV1
+#else
+#define PSDK_HAL_UART_DEV   "/dev/ttyS5"
+#endif
 #define PSDK_HAL_UART_BAUD  460800
 
-/* PSDK HAL network interface (for video/telemetry stream from E-port) */
-#define PSDK_HAL_NET_DEV    "eth0"
+/* PSDK HAL USB Bulk — FunctionFS gadget endpoints */
+#define PSDK_HAL_USB_BULK_EP_OUT "/dev/usb-ffs/bulk1/ep1"
+#define PSDK_HAL_USB_BULK_EP_IN  "/dev/usb-ffs/bulk1/ep2"
 
 /* Register all PSDK platform handlers.  Call before DjiCore_Init(). */
 int psdk_hal_register(void);

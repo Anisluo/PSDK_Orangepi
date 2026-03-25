@@ -3,14 +3,11 @@
  *
  * Hardware: OrangePi Zero3 + DJI E-Port → Mavic 3T
  *
- * Connection mode: DJI_USE_UART_AND_NETWORK_DEVICE
- *   E-Port provides:
- *     • UART  (/dev/ttyUSB0 @ 460800 baud) — low-speed command channel
- *     • USB   — creates a RNDIS/CDC-ECM virtual NIC (default: usb0)
- *               used by PSDK for high-speed telemetry/video data
+ * Default connection mode: DJI_USE_ONLY_UART
+ *   E-Port uses UART (/dev/ttyS5 @ 460800 baud) for auth/control.
  *
- * To change the network interface name, define EPORT_NETDEV when building:
- *   make PSDK_REAL=1 EPORT_NETDEV=usb1
+ * You can switch to USB Bulk or UART+Network by changing
+ * CONFIG_HARDWARE_CONNECTION below.
  */
 
 #ifndef DJI_SDK_CONFIG_H
@@ -25,6 +22,7 @@ extern "C" {
 #define DJI_USE_UART_AND_USB_BULK_DEVICE (1)
 #define DJI_USE_UART_AND_NETWORK_DEVICE  (2)
 
+/* UART+USB Bulk: matches libpayloadsdk.a build mode */
 #define CONFIG_HARDWARE_CONNECTION  DJI_USE_UART_AND_NETWORK_DEVICE
 
 /*

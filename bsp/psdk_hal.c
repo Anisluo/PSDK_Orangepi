@@ -1,17 +1,21 @@
 /*
  * psdk_hal.c — PSDK 3.9.2 platform registration for OrangePi Zero3
  *
- * Registers all platform handlers required by DJI PSDK before DjiCore_Init():
- *   1. OSAL   — pthreads + clock_gettime  (from SDK osal/osal.c)
- *   2. UART   — termios /dev/ttyUSB0      (from SDK hal/hal_uart.c)
- *   3. Network— USB RNDIS adapter (usb0)  (from SDK hal/hal_network.c)
- *   4. Socket — POSIX sockets             (from SDK osal/osal_socket.c)
- *   5. FileSystem — POSIX fs              (from SDK osal/osal_fs.c)
+ * Connection mode: DJI_USE_UART_AND_USB_BULK_DEVICE
+ *   M3E E-Port USB2.0 = USB HOST (active, enumerates payload device)
+ *   OrangePi USB-C    = USB DEVICE (gadget mode, enumerated by M3E)
  *
- * Hardware connection: DJI_USE_UART_AND_NETWORK_DEVICE
- *   E-Port USB creates a RNDIS network adapter on Linux.
- *   The default interface name is "usb0"; override via Makefile:
- *     make PSDK_REAL=1 EPORT_NETDEV=usb1
+ *   Run setup_gadget.sh first, then connect OrangePi USB-C to M3E E-Port.
+ *   M3E will enumerate OrangePi and see:
+ *     /dev/ttyGS0        — CDC-ACM gadget serial (PSDK UART channel)
+ *     /dev/usb-ffs/bulk1 — USB Bulk FunctionFS   (PSDK data channel)
+ *
+ * Registers all platform handlers required by DJI PSDK before DjiCore_Init():
+ *   1. OSAL      — pthreads + clock_gettime  (from SDK osal/osal.c)
+ *   2. UART      — /dev/ttyGS0 gadget serial (from SDK hal/hal_uart.c)
+ *   3. USB Bulk  — /dev/usb-ffs/bulk1        (from SDK hal/hal_usb_bulk.c)
+ *   4. Socket    — POSIX sockets             (from SDK osal/osal_socket.c)
+ *   5. FileSystem— POSIX fs                  (from SDK osal/osal_fs.c)
  *
  * Build modes:
  *   PSDK_REAL=1  — links against libpayloadsdk.a, full hardware support
@@ -33,11 +37,19 @@
 #include <dji_logger.h>
 
 /* SDK sample HAL/OSAL — compiled alongside this file via Makefile */
+#include "dji_sdk_config.h"
 #include "hal_uart.h"
-#include "hal_network.h"
 #include "osal.h"
 #include "osal_fs.h"
 #include "osal_socket.h"
+
+#if (CONFIG_HARDWARE_CONNECTION == DJI_USE_UART_AND_NETWORK_DEVICE)
+#include "hal_network.h"
+#endif
+
+#if (CONFIG_HARDWARE_CONNECTION == DJI_USE_UART_AND_USB_BULK_DEVICE)
+#include "hal_usb_bulk.h"
+#endif
 
 /* ── Console callback: forward PSDK internal logs to our logger ─────────── */
 static T_DjiReturnCode psdk_console_cb(const uint8_t *data, uint16_t data_len) {
@@ -107,17 +119,36 @@ int psdk_hal_register(void) {
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS)
         log_warn(TAG, "DjiLogger_AddConsole failed (non-fatal, 0x%08X)", rc);
 
-    /* ── 4. Network HAL (E-Port RNDIS USB adapter) ───────────────────────── */
-    T_DjiHalNetworkHandler net_handler = {
-        .NetworkInit          = HalNetWork_Init,
-        .NetworkDeInit        = HalNetWork_DeInit,
+    /* ── 4. Transport-specific handler ───────────────────────────────────── */
+#if (CONFIG_HARDWARE_CONNECTION == DJI_USE_UART_AND_USB_BULK_DEVICE)
+    T_DjiHalUsbBulkHandler usb_bulk_handler = {
+        .UsbBulkInit = HalUsbBulk_Init,
+        .UsbBulkDeInit = HalUsbBulk_DeInit,
+        .UsbBulkWriteData = HalUsbBulk_WriteData,
+        .UsbBulkReadData = HalUsbBulk_ReadData,
+        .UsbBulkGetDeviceInfo = HalUsbBulk_GetDeviceInfo,
+    };
+    rc = DjiPlatform_RegHalUsbBulkHandler(&usb_bulk_handler);
+    if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        log_error(TAG, "DjiPlatform_RegHalUsbBulkHandler failed (0x%08X)", rc);
+        return -1;
+    }
+    log_info(TAG, "Registered transport: UART + USB Bulk");
+#elif (CONFIG_HARDWARE_CONNECTION == DJI_USE_UART_AND_NETWORK_DEVICE)
+    T_DjiHalNetworkHandler network_handler = {
+        .NetworkInit = HalNetWork_Init,
+        .NetworkDeInit = HalNetWork_DeInit,
         .NetworkGetDeviceInfo = HalNetWork_GetDeviceInfo,
     };
-    rc = DjiPlatform_RegHalNetworkHandler(&net_handler);
+    rc = DjiPlatform_RegHalNetworkHandler(&network_handler);
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         log_error(TAG, "DjiPlatform_RegHalNetworkHandler failed (0x%08X)", rc);
         return -1;
     }
+    log_info(TAG, "Registered transport: UART + Network");
+#else
+    log_info(TAG, "Registered transport: UART only");
+#endif
 
     /* ── 5. Socket handler ───────────────────────────────────────────────── */
     T_DjiSocketHandler socket_handler = {
@@ -160,8 +191,7 @@ int psdk_hal_register(void) {
         return -1;
     }
 
-    log_info(TAG, "PSDK HAL registered (UART=%s NET=%s)",
-             PSDK_HAL_UART_DEV, PSDK_HAL_NET_DEV);
+    log_info(TAG, "PSDK HAL registered (UART=%s)", PSDK_HAL_UART_DEV);
     return 0;
 }
 

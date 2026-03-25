@@ -7,8 +7,9 @@
 #   make clean            remove build artefacts
 #   make run              stub build + run locally
 #
-# Cross-compile for OrangePi Zero3 (aarch64):
-#   make CC=aarch64-linux-gnu-gcc [PSDK_REAL=1]
+# Platform presets (sets CC, PSDK_LIB_ARCH, UART/NET device):
+#   make PSDK_REAL=1 PLATFORM=x86_dev     开发机 x86_64
+#   make PSDK_REAL=1 PLATFORM=orangepi    OrangePi Zero3 aarch64
 #
 # Override E-Port USB network interface (default: usb0):
 #   make PSDK_REAL=1 EPORT_NETDEV=usb1
@@ -21,22 +22,30 @@
 # =============================================================================
 
 CC      ?= gcc
-CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -D_POSIX_C_SOURCE=200809L
+CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
 LDFLAGS ?=
 
 BUILD_DIR := build
 BIN_DIR   := $(BUILD_DIR)/bin
 OBJ_DIR   := $(BUILD_DIR)/obj
 
+# ── Platform config (optional): make PLATFORM=x86_dev or PLATFORM=orangepi ───
+ifdef PLATFORM
+  include platform/$(PLATFORM)/platform.mk
+endif
+
 # ── DJI PSDK 3.9.2 SDK paths ─────────────────────────────────────────────────
-PSDK_SDK_DIR  ?= /home/aniston/Desktop/Payload-SDK-3.9.2
-PSDK_LIB_DIR  := $(PSDK_SDK_DIR)/psdk_lib/lib/aarch64-linux-gnu-gcc
+PSDK_SDK_DIR  ?= $(HOME)/Desktop/Payload-SDK-3.9.2
+PSDK_LIB_ARCH ?= x86_64-linux-gnu-gcc
+PSDK_LIB_DIR  := $(PSDK_SDK_DIR)/psdk_lib/lib/$(PSDK_LIB_ARCH)
 PSDK_INC_DIR  := $(PSDK_SDK_DIR)/psdk_lib/include
 PSDK_PLATFORM := $(PSDK_SDK_DIR)/samples/sample_c/platform/linux/manifold2
 PSDK_COMMON   := $(PSDK_SDK_DIR)/samples/sample_c/platform/linux/common
 
-# ── E-Port USB RNDIS network adapter device name (OrangePi Zero3 default) ────
+# ── E-Port USB RNDIS network adapter device name ──────────────────────────────
 EPORT_NETDEV ?= usb0
+PSDK_ENABLE_USB_BULK ?= 1
+PSDK_ENABLE_NETWORK  ?= 0
 
 # ── Include paths (always) ────────────────────────────────────────────────────
 INCLUDES := -Iinclude -Ibsp -Icore
@@ -60,6 +69,7 @@ APP_SRCS := \
 ifdef PSDK_REAL
   CFLAGS += \
       -DPSDK_REAL \
+      -DLINUX_UART_DEV1=\"/dev/ttyUSB0\" \
       -DLINUX_NETWORK_DEV=\"$(EPORT_NETDEV)\" \
       -I$(PSDK_INC_DIR) \
       -I$(PSDK_PLATFORM)/hal \
@@ -68,15 +78,20 @@ ifdef PSDK_REAL
   # SDK sample HAL/OSAL sources compiled into our binary
   PSDK_SRCS := \
       $(PSDK_PLATFORM)/hal/hal_uart.c \
-      $(PSDK_PLATFORM)/hal/hal_network.c \
       $(PSDK_COMMON)/osal/osal.c \
       $(PSDK_COMMON)/osal/osal_fs.c \
       $(PSDK_COMMON)/osal/osal_socket.c
 
+  ifeq ($(PSDK_ENABLE_NETWORK),1)
+    PSDK_SRCS += $(PSDK_PLATFORM)/hal/hal_network.c
+  endif
+  ifeq ($(PSDK_ENABLE_USB_BULK),1)
+    PSDK_SRCS += $(PSDK_PLATFORM)/hal/hal_usb_bulk.c
+  endif
+
   LDFLAGS += \
       -L$(PSDK_LIB_DIR) \
       -lpayloadsdk \
-      -lusb-1.0 \
       -lssl -lcrypto \
       -lrt
 

@@ -35,12 +35,12 @@ int psdk_init(void) {
     /* Step 2: initialise core with app info */
     T_DjiUserInfo user_info;
     memset(&user_info, 0, sizeof(user_info));
-    strncpy(user_info.appName,            USER_APP_NAME,        DJI_SDK_APP_NAME_MAX_SIZE - 1);
-    strncpy(user_info.appId,              USER_APP_ID,          DJI_SDK_APP_ID_MAX_SIZE - 1);
-    strncpy(user_info.appKey,             USER_APP_KEY,         DJI_SDK_APP_KEY_MAX_SIZE - 1);
-    strncpy(user_info.appLicense,         USER_APP_LICENSE,     DJI_SDK_APP_LICENSE_MAX_SIZE - 1);
-    strncpy(user_info.developerAccountStr,USER_DEVELOPER_ACCOUNT, DJI_SDK_DEVELOPER_ACCOUNT_MAX_SIZE - 1);
-    strncpy(user_info.baudRate,           USER_BAUD_RATE,       DJI_SDK_BAUD_RATE_MAX_SIZE - 1);
+    strncpy(user_info.appName,         USER_APP_NAME,         sizeof(user_info.appName) - 1);
+    strncpy(user_info.appId,           USER_APP_ID,           sizeof(user_info.appId) - 1);
+    strncpy(user_info.appKey,          USER_APP_KEY,          sizeof(user_info.appKey) - 1);
+    strncpy(user_info.appLicense,      USER_APP_LICENSE,      sizeof(user_info.appLicense) - 1);
+    strncpy(user_info.developerAccount,USER_DEVELOPER_ACCOUNT,sizeof(user_info.developerAccount) - 1);
+    strncpy(user_info.baudRate,        USER_BAUD_RATE,        sizeof(user_info.baudRate) - 1);
 
     T_DjiReturnCode rc = DjiCore_Init(&user_info);
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
