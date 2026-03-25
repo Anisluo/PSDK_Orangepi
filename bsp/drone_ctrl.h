@@ -40,4 +40,7 @@ DroneError drone_shoot_photo      (void);
 DroneError drone_start_recording  (void);
 DroneError drone_stop_recording   (void);
 
+/* ── Wayline / KMZ ───────────────────────────────────────────────────────── */
+DroneError drone_upload_kmz       (const char *path);
+
 #endif /* DRONE_CTRL_H */

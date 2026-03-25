@@ -1,0 +1,17 @@
+[Unit]
+Description=DJI PSDK Bridge Autostart
+After=local-fs.target systemd-modules-load.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/orangepi/PSDK
+ExecStart=/bin/bash /home/orangepi/PSDK/tools/start_dual.sh
+Restart=on-failure
+RestartSec=8
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

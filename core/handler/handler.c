@@ -26,8 +26,10 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <limits.h>
 
 #define TAG "core.handler"
+#define KMZ_BASE_DIR "/home/orangepi/PSDK/kmz_data"
 
 static UdpServer *g_srv = NULL;
 
@@ -46,8 +48,15 @@ static uint64_t uptime_ms(void) {
     }
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    return (uint64_t)(now.tv_sec  - g_start.tv_sec)  * 1000ULL
-         + (uint64_t)(now.tv_nsec - g_start.tv_nsec) / 1000000ULL;
+    time_t sec = now.tv_sec - g_start.tv_sec;
+    long nsec = now.tv_nsec - g_start.tv_nsec;
+
+    if (nsec < 0) {
+        sec -= 1;
+        nsec += 1000000000L;
+    }
+
+    return (uint64_t) sec * 1000ULL + (uint64_t) nsec / 1000000ULL;
 }
 
 /* ── Reply helpers ────────────────────────────────────────────────────────── */
@@ -166,6 +175,38 @@ static void h_drone_get_rtk_status(const struct sockaddr_in *peer, int id) {
         r.fix_type, r.satellites,
         r.lat, r.lon, r.alt_m);
     send_result(peer, id, result);
+}
+
+static void h_drone_upload_kmz(const struct sockaddr_in *peer, int id,
+                               json_object *params) {
+    const char *name = rpc_param_str(params, "file");
+    char path[PATH_MAX];
+    DroneError err;
+
+    if (!name || name[0] == '\0') {
+        send_error(peer, id, "missing param: file");
+        return;
+    }
+
+    if (strstr(name, "..") || strchr(name, '/')) {
+        send_error(peer, id, "invalid file name");
+        return;
+    }
+
+    snprintf(path, sizeof(path), "%s/%s", KMZ_BASE_DIR, name);
+    err = drone_upload_kmz(path);
+    if (err != DRONE_OK) {
+        send_error(peer, id, "kmz upload failed");
+        return;
+    }
+
+    {
+        char result[PATH_MAX + 64];
+        snprintf(result, sizeof(result),
+                 "{\"uploaded\":true,\"file\":\"%s\",\"path\":\"%s\"}",
+                 name, path);
+        send_result(peer, id, result);
+    }
 }
 
 /* ── SET: RTH altitude ────────────────────────────────────────────────────── */
@@ -305,6 +346,8 @@ int handle_rpc(const struct sockaddr_in *peer,
         h_drone_get_camera_state(peer, id);
     else if (!strcmp(m, "drone.get_rtk_status"))
         h_drone_get_rtk_status(peer, id);
+    else if (!strcmp(m, "drone.upload_kmz"))
+        h_drone_upload_kmz(peer, id, p);
     /* set */
     else if (!strcmp(m, "drone.set_rth_altitude"))
         h_drone_set_rth_altitude(peer, id, p);
