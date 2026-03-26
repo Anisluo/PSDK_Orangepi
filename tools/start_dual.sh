@@ -423,35 +423,43 @@ main() {
     while true; do
         cycle=$((cycle + 1))
         log "===== startup cycle $cycle =====" | tee -a "$BOOT_LOG"
+
+        # 每个 cycle 开始时完整重建 gadget（首次或上一 cycle 彻底失败后）
+        cleanup_processes
+        rebuild_gadget
+
+        if [ "$DRONE_MODEL" = "M3TD" ]; then
+            if ! setup_m3td_udc; then
+                log "cycle $cycle failed at M3TD UDC setup" | tee -a "$BOOT_LOG"
+                sleep "$CYCLE_SLEEP"
+                continue
+            fi
+        else
+            if ! wait_for_usb0; then
+                log "cycle $cycle failed before psdkd start (usb0 missing)" | tee -a "$BOOT_LOG"
+                reset_usb_net
+                sleep "$CYCLE_SLEEP"
+                continue
+            fi
+            prepare_usb0
+            wait_for_carrier >>"$BOOT_LOG" 2>&1 &
+        fi
+
+        # inner retry: 只重启 psdkd，不重建 gadget，保持 E-Port 通信不中断
         for start_delay in $effective_start_delays; do
             log "----- cycle $cycle delay=${start_delay}s -----" | tee -a "$BOOT_LOG"
             cleanup_processes
-            rebuild_gadget
-
-            if [ "$DRONE_MODEL" = "M3TD" ]; then
-                if ! setup_m3td_udc; then
-                    log "cycle $cycle delay=${start_delay}s failed at M3TD UDC setup" | tee -a "$BOOT_LOG"
-                    continue
-                fi
-            else
-                if ! wait_for_usb0; then
-                    log "cycle $cycle delay=${start_delay}s failed before psdkd start" | tee -a "$BOOT_LOG"
-                    continue
-                fi
-                prepare_usb0
-                wait_for_carrier >>"$BOOT_LOG" 2>&1 &
-            fi
 
             if start_and_watch "$start_delay" | tee -a "$BOOT_LOG"; then
                 return 0
             fi
 
-            log "cycle $cycle delay=${start_delay}s failed; resetting before retry" | tee -a "$BOOT_LOG"
-            reset_usb_net
+            log "cycle $cycle delay=${start_delay}s failed; retrying psdkd without gadget rebuild" | tee -a "$BOOT_LOG"
             sleep 1
         done
 
-        log "cycle $cycle exhausted; sleeping ${CYCLE_SLEEP}s before next cycle" | tee -a "$BOOT_LOG"
+        log "cycle $cycle exhausted; rebuilding gadget and sleeping ${CYCLE_SLEEP}s" | tee -a "$BOOT_LOG"
+        reset_usb_net
         sleep "$CYCLE_SLEEP"
     done
 }

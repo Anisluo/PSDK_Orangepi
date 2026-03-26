@@ -25,6 +25,7 @@
 #ifdef PSDK_REAL
 
 #include <string.h>
+#include <unistd.h>
 #include <dji_core.h>
 #include "dji_sdk_app_info.h"   /* fill in your credentials here */
 
@@ -49,13 +50,29 @@ int psdk_init(void) {
     strncpy(user_info.developerAccount,USER_DEVELOPER_ACCOUNT,sizeof(user_info.developerAccount) - 1);
     strncpy(user_info.baudRate,        USER_BAUD_RATE,        sizeof(user_info.baudRate) - 1);
 
-    T_DjiReturnCode rc = DjiCore_Init(&user_info);
+    /* DjiCore_Init may fail the first few attempts while the aircraft's
+     * E-Port UART is still booting. Retry internally so psdkd keeps the
+     * UART open and sends identification packets — this prevents E-Port
+     * from triggering its power-cut timeout between retries. */
+    T_DjiReturnCode rc;
+    int attempt = 0;
+    do {
+        if (attempt > 0) {
+            log_warn(TAG, "DjiCore_Init attempt %d failed (0x%08X), retrying in 1s...",
+                     attempt, rc);
+            DjiCore_DeInit();
+            sleep(1);
+        }
+        rc = DjiCore_Init(&user_info);
+        attempt++;
+    } while (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS && attempt < 30);
+
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
-        log_error(TAG, "DjiCore_Init failed (0x%08X)", rc);
+        log_error(TAG, "DjiCore_Init failed after %d attempts (0x%08X)", attempt, rc);
         psdk_hal_usb_bulk_release();
         return -1;
     }
-    log_info(TAG, "DjiCore_Init OK");
+    log_info(TAG, "DjiCore_Init OK (attempt %d)", attempt);
 
     /* Step 3: optional metadata */
     rc = DjiCore_SetAlias("PSDK-Bridge");
