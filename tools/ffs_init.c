@@ -6,7 +6,7 @@
  * 此后 UDC 才能成功绑定，psdkd 才能打开 ep1/ep2。
  *
  * 用法:
- *   sudo ./ffs_init /dev/usb-ffs/bulk1 &
+ *   sudo ./ffs_init /dev/usb-ffs/bulk1 [if_num ep_in ep_out] &
  *   echo musb-hdrc.5.auto > /sys/kernel/config/usb_gadget/psdk/UDC
  *   sudo ./psdkd --debug
  *
@@ -62,12 +62,7 @@ struct usb_ep_desc {
     uint8_t  bInterval;
 } __attribute__((packed));
 
-/* 完整描述符结构 (FS + HS)
- *
- * 端点顺序与 SDK hal_usb_bulk.c 匹配:
- *   ep1 = BULK IN  (device→host): SDK 用 write() 发数据给 M3E
- *   ep2 = BULK OUT (host→device): SDK 用 read()  从 M3E 收数据
- */
+/* 完整描述符结构 (FS + HS) */
 struct ffs_descriptors {
     struct ffs_desc_v1_head head;
     /* Full-Speed (3 descriptors: 1 intf + 2 ep) */
@@ -80,70 +75,75 @@ struct ffs_descriptors {
     struct usb_ep_desc   ep_out_hs;
 } __attribute__((packed));
 
-static const struct ffs_descriptors descriptors = {
-    .head = {
-        .magic    = LE32(FUNCTIONFS_DESCRIPTORS_MAGIC),
-        .length   = LE32(sizeof(struct ffs_descriptors)),
-        .fs_count = LE32(3),
-        .hs_count = LE32(3),
-    },
-    /* ── Full-Speed ── */
-    .intf_fs = {
-        .bLength            = sizeof(struct usb_intf_desc),
-        .bDescriptorType    = 0x04,
-        .bInterfaceNumber   = 0,
-        .bAlternateSetting  = 0,
-        .bNumEndpoints      = 2,
-        .bInterfaceClass    = 0xFF, /* Vendor */
-        .bInterfaceSubClass = 0x00,
-        .bInterfaceProtocol = 0x00,
-        .iInterface         = 0,
-    },
-    .ep_in_fs = {
-        .bLength          = sizeof(struct usb_ep_desc),
-        .bDescriptorType  = 0x05,
-        .bEndpointAddress = 0x83,   /* EP3 IN  (device→host, matches LINUX_USB_BULK1_END_POINT_IN=0x83) */
-        .bmAttributes     = 0x02,   /* Bulk */
-        .wMaxPacketSize   = LE16(64),
-        .bInterval        = 0,
-    },
-    .ep_out_fs = {
-        .bLength          = sizeof(struct usb_ep_desc),
-        .bDescriptorType  = 0x05,
-        .bEndpointAddress = 0x02,   /* EP2 OUT (host→device) */
-        .bmAttributes     = 0x02,   /* Bulk */
-        .wMaxPacketSize   = LE16(64),
-        .bInterval        = 0,
-    },
-    /* ── High-Speed ── */
-    .intf_hs = {
-        .bLength            = sizeof(struct usb_intf_desc),
-        .bDescriptorType    = 0x04,
-        .bInterfaceNumber   = 0,
-        .bAlternateSetting  = 0,
-        .bNumEndpoints      = 2,
-        .bInterfaceClass    = 0xFF,
-        .bInterfaceSubClass = 0x00,
-        .bInterfaceProtocol = 0x00,
-        .iInterface         = 0,
-    },
-    .ep_in_hs = {
-        .bLength          = sizeof(struct usb_ep_desc),
-        .bDescriptorType  = 0x05,
-        .bEndpointAddress = 0x83,   /* EP3 IN (matches LINUX_USB_BULK1_END_POINT_IN=0x83) */
-        .bmAttributes     = 0x02,
-        .wMaxPacketSize   = LE16(512),
-        .bInterval        = 0,
-    },
-    .ep_out_hs = {
-        .bLength          = sizeof(struct usb_ep_desc),
-        .bDescriptorType  = 0x05,
-        .bEndpointAddress = 0x02,   /* EP2 OUT */
-        .bmAttributes     = 0x02,
-        .wMaxPacketSize   = LE16(512),
-        .bInterval        = 0,
-    },
-};
+static struct ffs_descriptors make_descriptors(uint8_t if_num,
+                                               uint8_t ep_in_addr,
+                                               uint8_t ep_out_addr)
+{
+    struct ffs_descriptors descriptors = {
+        .head = {
+            .magic    = LE32(FUNCTIONFS_DESCRIPTORS_MAGIC),
+            .length   = LE32(sizeof(struct ffs_descriptors)),
+            .fs_count = LE32(3),
+            .hs_count = LE32(3),
+        },
+        .intf_fs = {
+            .bLength            = sizeof(struct usb_intf_desc),
+            .bDescriptorType    = 0x04,
+            .bInterfaceNumber   = if_num,
+            .bAlternateSetting  = 0,
+            .bNumEndpoints      = 2,
+            .bInterfaceClass    = 0xFF,
+            .bInterfaceSubClass = 0x00,
+            .bInterfaceProtocol = 0x00,
+            .iInterface         = 0,
+        },
+        .ep_in_fs = {
+            .bLength          = sizeof(struct usb_ep_desc),
+            .bDescriptorType  = 0x05,
+            .bEndpointAddress = ep_in_addr,
+            .bmAttributes     = 0x02,
+            .wMaxPacketSize   = LE16(64),
+            .bInterval        = 0,
+        },
+        .ep_out_fs = {
+            .bLength          = sizeof(struct usb_ep_desc),
+            .bDescriptorType  = 0x05,
+            .bEndpointAddress = ep_out_addr,
+            .bmAttributes     = 0x02,
+            .wMaxPacketSize   = LE16(64),
+            .bInterval        = 0,
+        },
+        .intf_hs = {
+            .bLength            = sizeof(struct usb_intf_desc),
+            .bDescriptorType    = 0x04,
+            .bInterfaceNumber   = if_num,
+            .bAlternateSetting  = 0,
+            .bNumEndpoints      = 2,
+            .bInterfaceClass    = 0xFF,
+            .bInterfaceSubClass = 0x00,
+            .bInterfaceProtocol = 0x00,
+            .iInterface         = 0,
+        },
+        .ep_in_hs = {
+            .bLength          = sizeof(struct usb_ep_desc),
+            .bDescriptorType  = 0x05,
+            .bEndpointAddress = ep_in_addr,
+            .bmAttributes     = 0x02,
+            .wMaxPacketSize   = LE16(512),
+            .bInterval        = 0,
+        },
+        .ep_out_hs = {
+            .bLength          = sizeof(struct usb_ep_desc),
+            .bDescriptorType  = 0x05,
+            .bEndpointAddress = ep_out_addr,
+            .bmAttributes     = 0x02,
+            .wMaxPacketSize   = LE16(512),
+            .bInterval        = 0,
+        },
+    };
+
+    return descriptors;
+}
 
 /* ── strings: 0 语言, 0 字符串 ───────────────────────────────────────────── */
 /* kernel 6.1: lang_count=0 works; lang_count=1 with str_count=0 → EINVAL  */
@@ -162,7 +162,15 @@ static const struct {
 int main(int argc, char *argv[])
 {
     const char *ffs_dir = "/dev/usb-ffs/bulk1";
+    uint8_t if_num = 0;
+    uint8_t ep_in_addr = 0x83;
+    uint8_t ep_out_addr = 0x02;
     if (argc >= 2) ffs_dir = argv[1];
+    if (argc >= 3) if_num = (uint8_t)strtoul(argv[2], NULL, 0);
+    if (argc >= 4) ep_in_addr = (uint8_t)strtoul(argv[3], NULL, 0);
+    if (argc >= 5) ep_out_addr = (uint8_t)strtoul(argv[4], NULL, 0);
+
+    struct ffs_descriptors descriptors = make_descriptors(if_num, ep_in_addr, ep_out_addr);
 
     char ep0_path[256];
     snprintf(ep0_path, sizeof(ep0_path), "%s/ep0", ffs_dir);
@@ -175,7 +183,8 @@ int main(int argc, char *argv[])
     }
 
     /* 写描述符 */
-    printf("[ffs_init] 写入 USB 描述符 (%zu bytes)\n", sizeof(descriptors));
+    printf("[ffs_init] 写入 USB 描述符 (%zu bytes, if=%u in=0x%02X out=0x%02X)\n",
+           sizeof(descriptors), if_num, ep_in_addr, ep_out_addr);
     ssize_t n = write(fd, &descriptors, sizeof(descriptors));
     if (n < 0) {
         perror("write descriptors");
@@ -183,12 +192,11 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* 写 strings (1 语言, 0 字符串) */
+    /* 写 strings — 部分内核 (sun50iw9 6.1) 写 strings 返回 EINVAL 但已进入 ACTIVE */
     n = write(fd, &strings, sizeof(strings));
     if (n < 0) {
-        perror("write strings");
-        close(fd);
-        return 1;
+        perror("write strings (non-fatal, continuing)");
+        /* 不退出 — 描述符已写入，内核可能已接受 */
     }
     printf("[ffs_init] FunctionFS 进入 ACTIVE 状态\n");
 

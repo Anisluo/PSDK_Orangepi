@@ -32,6 +32,13 @@ int psdk_init(void) {
     /* Step 1: register platform handlers */
     if (psdk_hal_register() != 0) return -1;
 
+    /* In M3TD mode, keep FunctionFS bulk endpoints open before DjiCore_Init().
+     * This gives the aircraft a live USB Bulk receive path during negotiate. */
+    if (psdk_hal_usb_bulk_prepare() != 0) {
+        log_error(TAG, "USB bulk pre-open failed");
+        return -1;
+    }
+
     /* Step 2: initialise core with app info */
     T_DjiUserInfo user_info;
     memset(&user_info, 0, sizeof(user_info));
@@ -45,6 +52,7 @@ int psdk_init(void) {
     T_DjiReturnCode rc = DjiCore_Init(&user_info);
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         log_error(TAG, "DjiCore_Init failed (0x%08X)", rc);
+        psdk_hal_usb_bulk_release();
         return -1;
     }
     log_info(TAG, "DjiCore_Init OK");
@@ -68,6 +76,7 @@ int psdk_init(void) {
     rc = DjiCore_ApplicationStart();
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         log_error(TAG, "DjiCore_ApplicationStart failed (0x%08X)", rc);
+        psdk_hal_usb_bulk_release();
         return -1;
     }
     log_info(TAG, "PSDK application started — E-Port handshake complete");
@@ -76,6 +85,7 @@ int psdk_init(void) {
 
 void psdk_deinit(void) {
     DjiCore_DeInit();
+    psdk_hal_usb_bulk_release();
     log_info(TAG, "PSDK de-initialised");
 }
 

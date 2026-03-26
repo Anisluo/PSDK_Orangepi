@@ -1,5 +1,6 @@
 #!/bin/bash
-# start_dual.sh -- PSDK dual transport startup for OrangePi Zero3 + M3E E-Port
+# start_dual.sh -- PSDK dual transport startup for OrangePi Zero3
+# 支持 M3E/M3T (RNDIS + ACM) 和 M3TD (USB Bulk FunctionFS + ACM)
 set -euo pipefail
 
 PSDK_DIR=/home/orangepi/PSDK
@@ -9,10 +10,29 @@ UDC_FILE=$GADGET/UDC
 UDC=$(ls /sys/class/udc/ 2>/dev/null | head -1)
 BOOT_LOG=/tmp/psdk_boot.log
 ATTEMPT_LOG=/tmp/psdk_attempt.log
-NEGOTIATE_TIMEOUT=24
+NEGOTIATE_TIMEOUT=180
 START_DELAYS="0 2 4"
 CYCLE_SLEEP=4
 USB_WAIT_POLLS=40
+M3TD_USB_PROFILE="${M3TD_USB_PROFILE:-}"
+M3TD_ENUM_SETTLE="${M3TD_ENUM_SETTLE:-2}"
+M3TD_PSDK_START_DELAY="${M3TD_PSDK_START_DELAY:-2}"
+
+# 读取型号配置: M3E / M3T → RNDIS 模式; M3TD → USB Bulk FunctionFS 模式 [默认]
+MODEL_FILE="$PSDK_DIR/drone_model"
+DRONE_MODEL="M3TD"
+if [ -f "$MODEL_FILE" ]; then
+    DRONE_MODEL=$(cat "$MODEL_FILE" | tr -d '[:space:]')
+fi
+
+if [ -z "$M3TD_USB_PROFILE" ]; then
+    if [ "$DRONE_MODEL" = "M3TD" ]; then
+        M3TD_USB_PROFILE="manifold3"
+    else
+        M3TD_USB_PROFILE="legacy"
+    fi
+fi
+
 CARRIER_WAIT_POLLS=6
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -71,9 +91,12 @@ setup_rndis_macs() {
 
 cleanup_processes() {
     log "[1] cleaning previous processes"
+    # SIGTERM 先，然后 SIGKILL 确保清理（psdkd 可能阻塞在 SDK 调用里无法响应 SIGTERM）
     pkill -x psdkd 2>/dev/null || true
-    pkill -f '/home/orangepi/PSDK/build/bin/psdkd --debug' 2>/dev/null || true
     pkill -f ffs_init 2>/dev/null || true
+    sleep 1
+    pkill -9 -x psdkd 2>/dev/null || true
+    pkill -9 -f ffs_init 2>/dev/null || true
     sleep 0.5
 }
 
@@ -82,8 +105,25 @@ reset_usb_net() {
     ip addr flush dev usb0 2>/dev/null || true
 }
 
+cleanup_ffs_mounts() {
+    local dir
+    for dir in bulk1 bulk2 bulk3 bulk6; do
+        if mountpoint -q "/dev/usb-ffs/$dir" 2>/dev/null; then
+            umount "/dev/usb-ffs/$dir" 2>/dev/null || true
+        fi
+    done
+}
+
+mount_ffs_dir() {
+    local name=$1
+    mkdir -p "/dev/usb-ffs/$name"
+    if ! mountpoint -q "/dev/usb-ffs/$name"; then
+        mount -t functionfs "$name" "/dev/usb-ffs/$name"
+    fi
+}
+
 rebuild_gadget() {
-    log "[2] rebuilding USB gadget"
+    log "[2] rebuilding USB gadget (model=$DRONE_MODEL)"
 
     reset_usb_net
     ensure_configfs
@@ -94,17 +134,23 @@ rebuild_gadget() {
     fi
 
     modprobe libcomposite 2>/dev/null || true
-    modprobe usb_f_rndis 2>/dev/null || true
     modprobe usb_f_acm 2>/dev/null || true
+
+    cleanup_ffs_mounts
 
     if [ -d "$GADGET" ]; then
         rm -f "$GADGET"/configs/c.1/rndis.usb0 2>/dev/null || true
         rm -f "$GADGET"/configs/c.1/acm.GS0 2>/dev/null || true
         rm -f "$GADGET"/os_desc/c.1 2>/dev/null || true
         rm -f "$GADGET"/configs/c.1/ffs.bulk1 2>/dev/null || true
-        rm -f "$GADGET"/configs/c.1/acm.GS0 2>/dev/null || true
+        rm -f "$GADGET"/configs/c.1/ffs.bulk2 2>/dev/null || true
+        rm -f "$GADGET"/configs/c.1/ffs.bulk3 2>/dev/null || true
+        rm -f "$GADGET"/configs/c.1/ffs.bulk6 2>/dev/null || true
         rmdir "$GADGET"/functions/rndis.usb0 2>/dev/null || true
         rmdir "$GADGET"/functions/ffs.bulk1 2>/dev/null || true
+        rmdir "$GADGET"/functions/ffs.bulk2 2>/dev/null || true
+        rmdir "$GADGET"/functions/ffs.bulk3 2>/dev/null || true
+        rmdir "$GADGET"/functions/ffs.bulk6 2>/dev/null || true
         rmdir "$GADGET"/functions/acm.GS0 2>/dev/null || true
         rmdir "$GADGET"/os_desc 2>/dev/null || true
         rmdir "$GADGET"/configs/c.1/strings/0x409 2>/dev/null || true
@@ -113,41 +159,95 @@ rebuild_gadget() {
         rmdir "$GADGET" 2>/dev/null || true
     fi
 
-    mkdir -p "$GADGET"
-    echo 0x0955 > "$GADGET"/idVendor
-    echo 0x7020 > "$GADGET"/idProduct
-    echo 0x0002 > "$GADGET"/bcdDevice
-    echo 0x0200 > "$GADGET"/bcdUSB
-    echo 0xEF > "$GADGET"/bDeviceClass
-    echo 0x02 > "$GADGET"/bDeviceSubClass
-    echo 0x01 > "$GADGET"/bDeviceProtocol
-    mkdir -p "$GADGET"/strings/0x409
-    echo "NVIDIA" > "$GADGET"/strings/0x409/manufacturer
-    echo "Manifold2" > "$GADGET"/strings/0x409/product
-    echo "DJI00000001" > "$GADGET"/strings/0x409/serialnumber
-    mkdir -p "$GADGET"/os_desc
-    echo 1 > "$GADGET"/os_desc/use
-    echo 0xcd > "$GADGET"/os_desc/b_vendor_code
-    echo "MSFT100" > "$GADGET"/os_desc/qw_sign
-    mkdir -p "$GADGET"/configs/c.1/strings/0x409
-    echo 250 > "$GADGET"/configs/c.1/MaxPower
-    echo "PSDK" > "$GADGET"/configs/c.1/strings/0x409/configuration
-    mkdir -p "$GADGET"/functions/rndis.usb0
-    setup_rndis_macs
-    echo "RNDIS" > "$GADGET"/functions/rndis.usb0/os_desc/interface.rndis/compatible_id
-    echo "5162001" > "$GADGET"/functions/rndis.usb0/os_desc/interface.rndis/sub_compatible_id
-    ln -s "$GADGET"/functions/rndis.usb0 "$GADGET"/configs/c.1/
-    mkdir -p "$GADGET"/functions/acm.GS0
-    ln -s "$GADGET"/functions/acm.GS0 "$GADGET"/configs/c.1/
-    ln -s "$GADGET"/configs/c.1 "$GADGET"/os_desc/c.1
+    if [ "$DRONE_MODEL" = "M3TD" ]; then
+        # M3TD: USB Bulk FunctionFS.
+        modprobe usb_f_fs 2>/dev/null || true
 
-    log "[3] binding UDC: $UDC"
-    echo "$UDC" > "$UDC_FILE"
-    log "UDC state: $(cat /sys/class/udc/"$UDC"/state 2>/dev/null || echo unknown)"
+        mkdir -p "$GADGET"
+        echo 0x2CA3 > "$GADGET"/idVendor
+        if [ "$M3TD_USB_PROFILE" = "manifold3" ]; then
+            echo 0x3181 > "$GADGET"/idProduct
+        else
+            echo 0x001F > "$GADGET"/idProduct
+        fi
+        echo 0x0100 > "$GADGET"/bcdDevice
+        echo 0x0200 > "$GADGET"/bcdUSB
+        mkdir -p "$GADGET"/strings/0x409
+        echo "DJI"          > "$GADGET"/strings/0x409/manufacturer
+        echo "PSDK Payload" > "$GADGET"/strings/0x409/product
+        echo "PSDK0001"     > "$GADGET"/strings/0x409/serialnumber
+        mkdir -p "$GADGET"/configs/c.1/strings/0x409
+        echo 500  > "$GADGET"/configs/c.1/MaxPower
+        echo "PSDK" > "$GADGET"/configs/c.1/strings/0x409/configuration
+
+        if [ "$M3TD_USB_PROFILE" = "manifold3" ]; then
+            mkdir -p "$GADGET"/functions/ffs.bulk2
+            mkdir -p "$GADGET"/functions/ffs.bulk3
+            mkdir -p "$GADGET"/functions/ffs.bulk6
+            ln -sfn "$GADGET"/functions/ffs.bulk2 "$GADGET"/configs/c.1/ffs.bulk2
+            ln -sfn "$GADGET"/functions/ffs.bulk3 "$GADGET"/configs/c.1/ffs.bulk3
+            ln -sfn "$GADGET"/functions/ffs.bulk6 "$GADGET"/configs/c.1/ffs.bulk6
+            mount_ffs_dir bulk2
+            mount_ffs_dir bulk3
+            mount_ffs_dir bulk6
+            log "USB Bulk FunctionFS mounted → /dev/usb-ffs/{bulk2,bulk3,bulk6}"
+        else
+            mkdir -p "$GADGET"/functions/ffs.bulk1
+            ln -sfn "$GADGET"/functions/ffs.bulk1 "$GADGET"/configs/c.1/ffs.bulk1
+            mount_ffs_dir bulk1
+            log "USB Bulk FunctionFS mounted → /dev/usb-ffs/bulk1"
+        fi
+    else
+        # M3E / M3T: RNDIS + CDC-ACM (Manifold2 VID/PID)
+        modprobe usb_f_rndis 2>/dev/null || true
+
+        mkdir -p "$GADGET"
+        echo 0x0955 > "$GADGET"/idVendor
+        echo 0x7020 > "$GADGET"/idProduct
+        echo 0x0002 > "$GADGET"/bcdDevice
+        echo 0x0200 > "$GADGET"/bcdUSB
+        echo 0xEF > "$GADGET"/bDeviceClass
+        echo 0x02 > "$GADGET"/bDeviceSubClass
+        echo 0x01 > "$GADGET"/bDeviceProtocol
+        mkdir -p "$GADGET"/strings/0x409
+        echo "NVIDIA"       > "$GADGET"/strings/0x409/manufacturer
+        echo "Manifold2"    > "$GADGET"/strings/0x409/product
+        echo "DJI00000001"  > "$GADGET"/strings/0x409/serialnumber
+        mkdir -p "$GADGET"/os_desc
+        echo 1        > "$GADGET"/os_desc/use
+        echo 0xcd     > "$GADGET"/os_desc/b_vendor_code
+        echo "MSFT100" > "$GADGET"/os_desc/qw_sign
+        mkdir -p "$GADGET"/configs/c.1/strings/0x409
+        echo 250   > "$GADGET"/configs/c.1/MaxPower
+        echo "PSDK" > "$GADGET"/configs/c.1/strings/0x409/configuration
+
+        mkdir -p "$GADGET"/functions/rndis.usb0
+        setup_rndis_macs
+        echo "RNDIS"   > "$GADGET"/functions/rndis.usb0/os_desc/interface.rndis/compatible_id
+        echo "5162001" > "$GADGET"/functions/rndis.usb0/os_desc/interface.rndis/sub_compatible_id
+        ln -s "$GADGET"/functions/rndis.usb0 "$GADGET"/configs/c.1/
+        mkdir -p "$GADGET"/functions/acm.GS0
+        ln -s "$GADGET"/functions/acm.GS0 "$GADGET"/configs/c.1/
+        ln -s "$GADGET"/configs/c.1 "$GADGET"/os_desc/c.1
+    fi
+
+    if [ "$DRONE_MODEL" != "M3TD" ]; then
+        log "[3] binding UDC: $UDC"
+        echo "$UDC" > "$UDC_FILE"
+        log "UDC state: $(cat /sys/class/udc/"$UDC"/state 2>/dev/null || echo unknown)"
+    else
+        log "[3] M3TD: UDC binding deferred until after ffs_init ($M3TD_USB_PROFILE)"
+    fi
 }
 
 wait_for_usb0() {
     local i
+
+    if [ "$DRONE_MODEL" = "M3TD" ]; then
+        # M3TD: FunctionFS 由 psdkd 内部初始化 ep0，不需要等 usb0
+        log "M3TD: skipping usb0 wait (USB Bulk mode)"
+        return 0
+    fi
 
     log "waiting for usb0 interface (up to $((USB_WAIT_POLLS / 2))s)"
     for i in $(seq 1 "$USB_WAIT_POLLS"); do
@@ -179,7 +279,73 @@ wait_for_carrier() {
     return 1
 }
 
+setup_m3td_udc() {
+    local FFS_INIT="$PSDK_DIR/tools/ffs_init"
+    local FFS_PATH=/dev/usb-ffs/bulk1
+
+    # 编译 ffs_init（源码比二进制新时重新编译）
+    local FFS_SRC="$PSDK_DIR/tools/ffs_init.c"
+    if [ ! -x "$FFS_INIT" ] || [ "$FFS_SRC" -nt "$FFS_INIT" ]; then
+        log "[3] 编译 ffs_init..."
+        gcc -o "$FFS_INIT" "$FFS_SRC" || {
+            log "ffs_init 编译失败"
+            return 1
+        }
+    fi
+
+    # 启动 ffs_init 写入 ep0 描述符并后台保持运行
+    pkill -f ffs_init 2>/dev/null || true
+    if [ "$M3TD_USB_PROFILE" = "manifold3" ]; then
+        "$FFS_INIT" /dev/usb-ffs/bulk2 2 0x83 0x02 &
+        "$FFS_INIT" /dev/usb-ffs/bulk3 3 0x84 0x03 &
+        "$FFS_INIT" /dev/usb-ffs/bulk6 6 0x87 0x06 &
+    else
+        "$FFS_INIT" "$FFS_PATH" &
+    fi
+    sleep 0.5
+
+    # 绑定 UDC
+    log "[3] binding UDC: $UDC (M3TD)"
+    if echo "$UDC" > "$UDC_FILE" 2>/dev/null; then
+        log "UDC 绑定成功"
+    else
+        log "UDC 绑定失败"
+        return 1
+    fi
+    log "UDC state: $(cat /sys/class/udc/"$UDC"/state 2>/dev/null || echo unknown)"
+
+    # 等待 ep1/ep2 出现（无人机枚举完成）
+    log "[4] 等待 M3TD 枚举完成 (profile=$M3TD_USB_PROFILE)..."
+    local i
+    for i in $(seq 1 40); do
+        if [ "$M3TD_USB_PROFILE" = "manifold3" ]; then
+            if [ -e /dev/usb-ffs/bulk2/ep1 ] && [ -e /dev/usb-ffs/bulk2/ep2 ] && \
+               [ -e /dev/usb-ffs/bulk3/ep1 ] && [ -e /dev/usb-ffs/bulk3/ep2 ] && \
+               [ -e /dev/usb-ffs/bulk6/ep1 ] && [ -e /dev/usb-ffs/bulk6/ep2 ]; then
+                log "bulk2/bulk3/bulk6 ep1/ep2 已出现 (${i}×0.5s)"
+                if [ "$M3TD_USB_PROFILE" = "manifold3" ] && [ "${M3TD_ENUM_SETTLE:-0}" -gt 0 ]; then
+                    log "[4] waiting ${M3TD_ENUM_SETTLE}s for manifold3 link settle"
+                    sleep "$M3TD_ENUM_SETTLE"
+                fi
+                return 0
+            fi
+        else
+            if [ -e "$FFS_PATH/ep1" ] && [ -e "$FFS_PATH/ep2" ]; then
+                log "ep1/ep2 已出现 (${i}×0.5s)"
+                return 0
+            fi
+        fi
+        sleep 0.5
+    done
+    log "M3TD endpoints 未出现，继续尝试..."
+    return 0
+}
+
 prepare_usb0() {
+    if [ "$DRONE_MODEL" = "M3TD" ]; then
+        log "[4] M3TD: no usb0 setup needed (USB Bulk mode)"
+        return 0
+    fi
     ip link set usb0 up 2>/dev/null || true
     ip addr flush dev usb0 2>/dev/null || true
     ip addr add 192.168.5.3/24 dev usb0 2>/dev/null || true
@@ -191,6 +357,11 @@ start_and_watch() {
     local pid
     local elapsed
     local start_delay=$1
+
+    if [ "$DRONE_MODEL" = "M3TD" ] && [ "$M3TD_USB_PROFILE" = "manifold3" ] && \
+       [ "$start_delay" -lt "$M3TD_PSDK_START_DELAY" ]; then
+        start_delay=$M3TD_PSDK_START_DELAY
+    fi
 
     : > "$ATTEMPT_LOG"
     if [ "$start_delay" -gt 0 ]; then
@@ -229,6 +400,8 @@ start_and_watch() {
     log "startup timed out after ${NEGOTIATE_TIMEOUT}s"
     tail -n 80 "$ATTEMPT_LOG" | sed 's/^/    /'
     kill "$pid" 2>/dev/null || true
+    sleep 1
+    kill -9 "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     return 1
 }
@@ -236,26 +409,38 @@ start_and_watch() {
 main() {
     local cycle
     local start_delay
+    local effective_start_delays="$START_DELAYS"
 
     : > "$BOOT_LOG"
-    log "=== PSDK startup (UART=/dev/ttyUSB0 + USB RNDIS) ===" | tee -a "$BOOT_LOG"
+    log "=== PSDK startup (model=$DRONE_MODEL) ===" | tee -a "$BOOT_LOG"
+
+    if [ "$DRONE_MODEL" = "M3TD" ] && [ "$M3TD_USB_PROFILE" = "manifold3" ]; then
+        effective_start_delays="2 4"
+        log "manifold3 startup profile enabled; using start delays: $effective_start_delays" | tee -a "$BOOT_LOG"
+    fi
 
     cycle=0
     while true; do
         cycle=$((cycle + 1))
         log "===== startup cycle $cycle =====" | tee -a "$BOOT_LOG"
-        for start_delay in $START_DELAYS; do
+        for start_delay in $effective_start_delays; do
             log "----- cycle $cycle delay=${start_delay}s -----" | tee -a "$BOOT_LOG"
             cleanup_processes
             rebuild_gadget
 
-            if ! wait_for_usb0; then
-                log "cycle $cycle delay=${start_delay}s failed before psdkd start" | tee -a "$BOOT_LOG"
-                continue
+            if [ "$DRONE_MODEL" = "M3TD" ]; then
+                if ! setup_m3td_udc; then
+                    log "cycle $cycle delay=${start_delay}s failed at M3TD UDC setup" | tee -a "$BOOT_LOG"
+                    continue
+                fi
+            else
+                if ! wait_for_usb0; then
+                    log "cycle $cycle delay=${start_delay}s failed before psdkd start" | tee -a "$BOOT_LOG"
+                    continue
+                fi
+                prepare_usb0
+                wait_for_carrier >>"$BOOT_LOG" 2>&1 &
             fi
-
-            prepare_usb0
-            wait_for_carrier >>"$BOOT_LOG" 2>&1 &
 
             if start_and_watch "$start_delay" | tee -a "$BOOT_LOG"; then
                 return 0

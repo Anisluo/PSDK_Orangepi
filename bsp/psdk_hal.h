@@ -14,7 +14,7 @@
  *
  * E-port wiring on OrangePi Zero3:
  *   - UART TX/RX via USB-UART bridge or direct 3.3V UART
- *   - Recommended: /dev/ttyUSB0 @ 460800 baud (DJI default)
+ *   - Recommended: /dev/ttyUSB0 @ 921600 baud for M3TD dual-link negotiation
  *   - Or USB bulk via /dev/usb-DJI (if using SKYPORT v2 USB mode)
  */
 
@@ -24,13 +24,24 @@
 #else
 #define PSDK_HAL_UART_DEV   "/dev/ttyS5"
 #endif
-#define PSDK_HAL_UART_BAUD  460800
+#define PSDK_HAL_UART_BAUD  921600
 
-/* PSDK HAL USB Bulk — FunctionFS gadget endpoints */
+/* PSDK HAL USB Bulk — default FunctionFS gadget endpoints */
 #define PSDK_HAL_USB_BULK_EP_OUT "/dev/usb-ffs/bulk1/ep1"
 #define PSDK_HAL_USB_BULK_EP_IN  "/dev/usb-ffs/bulk1/ep2"
+#define PSDK_HAL_USB_BULK2_EP_OUT "/dev/usb-ffs/bulk2/ep1"
+#define PSDK_HAL_USB_BULK2_EP_IN  "/dev/usb-ffs/bulk2/ep2"
+#define PSDK_HAL_USB_BULK3_EP_OUT "/dev/usb-ffs/bulk3/ep1"
+#define PSDK_HAL_USB_BULK3_EP_IN  "/dev/usb-ffs/bulk3/ep2"
+#define PSDK_HAL_USB_BULK6_EP_OUT "/dev/usb-ffs/bulk6/ep1"
+#define PSDK_HAL_USB_BULK6_EP_IN  "/dev/usb-ffs/bulk6/ep2"
 
 /* Register all PSDK platform handlers.  Call before DjiCore_Init(). */
 int psdk_hal_register(void);
+
+/* In M3TD USB Bulk mode, pre-open FunctionFS endpoints before DjiCore_Init().
+ * This keeps the bulk channel active during payload negotiate. */
+int psdk_hal_usb_bulk_prepare(void);
+void psdk_hal_usb_bulk_release(void);
 
 #endif /* PSDK_HAL_H */

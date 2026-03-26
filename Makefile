@@ -34,16 +34,65 @@ ifdef PLATFORM
   include platform/$(PLATFORM)/platform.mk
 endif
 
-# ── DJI PSDK 3.9.2 SDK paths ─────────────────────────────────────────────────
-PSDK_SDK_DIR  ?= $(HOME)/Desktop/Payload-SDK-3.9.2
+# ── Drone model selection ─────────────────────────────────────────────────────
+# M3E / M3T  : UART + RNDIS network  (DJI_USE_UART_AND_NETWORK_DEVICE)
+# M3TD       : UART + USB Bulk gadget (DJI_USE_UART_AND_USB_BULK_DEVICE) [默认]
+DRONE_MODEL ?= M3TD
+
+# ── DJI PSDK SDK paths ───────────────────────────────────────────────────────
+# 默认按机型选 SDK:
+#   M3E / M3T -> 3.9.2 优先
+#   M3TD      -> 3.12.0 优先
+ifeq ($(DRONE_MODEL),M3TD)
+  PSDK_SDK_DIR ?= $(firstword \
+	$(wildcard $(HOME)/Desktop/Payload-SDK-3.12.0) \
+	$(wildcard $(HOME)/Desktop/Payload-SDK-3.9.2))
+  PSDK_PLATFORM_VARIANT ?= manifold3
+else
+  PSDK_SDK_DIR ?= $(firstword \
+	$(wildcard $(HOME)/Desktop/Payload-SDK-3.9.2) \
+	$(wildcard $(HOME)/Desktop/Payload-SDK-3.12.0))
+  PSDK_PLATFORM_VARIANT ?= manifold2
+endif
+
 PSDK_LIB_ARCH ?= x86_64-linux-gnu-gcc
 PSDK_LIB_DIR  := $(PSDK_SDK_DIR)/psdk_lib/lib/$(PSDK_LIB_ARCH)
 PSDK_INC_DIR  := $(PSDK_SDK_DIR)/psdk_lib/include
-PSDK_PLATFORM := $(PSDK_SDK_DIR)/samples/sample_c/platform/linux/manifold2
+M3TD_CONN_MODE ?= dual
+PSDK_PLATFORM := $(PSDK_SDK_DIR)/samples/sample_c/platform/linux/$(PSDK_PLATFORM_VARIANT)
 PSDK_COMMON   := $(PSDK_SDK_DIR)/samples/sample_c/platform/linux/common
+PSDK_UART_HAL := $(PSDK_PLATFORM)/hal
 
 # ── E-Port USB RNDIS network adapter device name ──────────────────────────────
 EPORT_NETDEV ?= usb0
+
+ifeq ($(DRONE_MODEL),M3E)
+  PSDK_ENABLE_NETWORK  := 1
+  PSDK_ENABLE_USB_BULK := 0
+  DRONE_CONN_FLAG      := -DCONFIG_HARDWARE_CONNECTION=DJI_USE_UART_AND_NETWORK_DEVICE
+  DRONE_UART_DEV       ?= /dev/ttyUSB0
+else ifeq ($(DRONE_MODEL),M3T)
+  PSDK_ENABLE_NETWORK  := 1
+  PSDK_ENABLE_USB_BULK := 0
+  DRONE_CONN_FLAG      := -DCONFIG_HARDWARE_CONNECTION=DJI_USE_UART_AND_NETWORK_DEVICE
+  DRONE_UART_DEV       ?= /dev/ttyUSB0
+else
+  # M3TD and other Matrice 3D series: UART + USB Bulk gadget
+  PSDK_ENABLE_NETWORK  := 0
+  PSDK_ENABLE_USB_BULK := 1
+  ifeq ($(PSDK_PLATFORM_VARIANT),manifold3)
+    PSDK_UART_HAL      := $(PSDK_SDK_DIR)/samples/sample_c/platform/linux/manifold2/hal
+    ifeq ($(M3TD_CONN_MODE),bulk_only)
+      DRONE_CONN_FLAG  := -DCONFIG_HARDWARE_CONNECTION=DJI_USE_ONLY_USB_BULK_DEVICE
+    else
+      DRONE_CONN_FLAG  := -DCONFIG_HARDWARE_CONNECTION=DJI_USE_UART_AND_USB_BULK_DEVICE
+    endif
+  else
+    DRONE_CONN_FLAG    := -DCONFIG_HARDWARE_CONNECTION=DJI_USE_UART_AND_USB_BULK_DEVICE
+  endif
+  DRONE_UART_DEV       ?= /dev/ttyUSB0
+endif
+
 PSDK_ENABLE_USB_BULK ?= 1
 PSDK_ENABLE_NETWORK  ?= 0
 
@@ -69,18 +118,23 @@ APP_SRCS := \
 ifdef PSDK_REAL
   CFLAGS += \
       -DPSDK_REAL \
-      -DLINUX_UART_DEV1=\"/dev/ttyUSB0\" \
+      $(DRONE_CONN_FLAG) \
+      -DLINUX_UART_DEV1=\"$(DRONE_UART_DEV)\" \
       -DLINUX_NETWORK_DEV=\"$(EPORT_NETDEV)\" \
       -I$(PSDK_INC_DIR) \
       -I$(PSDK_PLATFORM)/hal \
+      -I$(PSDK_UART_HAL) \
       -I$(PSDK_COMMON)/osal
 
   # SDK sample HAL/OSAL sources compiled into our binary
   PSDK_SRCS := \
-      $(PSDK_PLATFORM)/hal/hal_uart.c \
       $(PSDK_COMMON)/osal/osal.c \
       $(PSDK_COMMON)/osal/osal_fs.c \
       $(PSDK_COMMON)/osal/osal_socket.c
+
+  ifneq ($(DRONE_CONN_FLAG),-DCONFIG_HARDWARE_CONNECTION=DJI_USE_ONLY_USB_BULK_DEVICE)
+    PSDK_SRCS += $(PSDK_UART_HAL)/hal_uart.c
+  endif
 
   ifeq ($(PSDK_ENABLE_NETWORK),1)
     PSDK_SRCS += $(PSDK_PLATFORM)/hal/hal_network.c

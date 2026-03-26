@@ -32,7 +32,21 @@
 
 ## 配置步骤
 
-在 OrangePi 上执行：
+推荐直接执行一键脚本：
+
+```bash
+cd /home/orangepi/PSDK
+sudo bash tools/setup_orangepi_autostart.sh
+```
+
+如果你想只安装并启用，但暂时不立即启动：
+
+```bash
+cd /home/orangepi/PSDK
+sudo bash tools/setup_orangepi_autostart.sh --no-start
+```
+
+等价的手工步骤如下：
 
 ```bash
 cd /home/orangepi/PSDK
