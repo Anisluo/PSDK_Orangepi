@@ -36,6 +36,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <dji_platform.h>
@@ -134,6 +135,13 @@ static T_DjiReturnCode psdk_console_cb(const uint8_t *data, uint16_t data_len) {
 
 int psdk_hal_register(void) {
     T_DjiReturnCode rc;
+    const char *internal_log_level = getenv("PSDK_INTERNAL_LOG_LEVEL");
+    E_DjiLoggerConsoleLogLevel console_level = DJI_LOGGER_CONSOLE_LOG_LEVEL_INFO;
+
+    if (internal_log_level != NULL &&
+        (strcmp(internal_log_level, "debug") == 0 || strcmp(internal_log_level, "DEBUG") == 0)) {
+        console_level = DJI_LOGGER_CONSOLE_LOG_LEVEL_DEBUG;
+    }
 
     /* ── 1. OSAL ─────────────────────────────────────────────────────────── */
     T_DjiOsalHandler osal_handler = {
@@ -181,7 +189,7 @@ int psdk_hal_register(void) {
     /* ── 3. Logger (must be after OSAL + UART) ───────────────────────────── */
     T_DjiLoggerConsole console = {
         .func           = psdk_console_cb,
-        .consoleLevel   = DJI_LOGGER_CONSOLE_LOG_LEVEL_DEBUG,
+        .consoleLevel   = console_level,
         .isSupportColor = false,
     };
     rc = DjiLogger_AddConsole(&console);

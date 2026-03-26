@@ -11,12 +11,23 @@ UDC=$(ls /sys/class/udc/ 2>/dev/null | head -1)
 BOOT_LOG=/tmp/psdk_boot.log
 ATTEMPT_LOG=/tmp/psdk_attempt.log
 NEGOTIATE_TIMEOUT=180
-START_DELAYS="0 2 4"
+START_DELAYS="${START_DELAYS:-0 2 4}"
 CYCLE_SLEEP=4
 USB_WAIT_POLLS=40
 M3TD_USB_PROFILE="${M3TD_USB_PROFILE:-}"
 M3TD_ENUM_SETTLE="${M3TD_ENUM_SETTLE:-2}"
 M3TD_PSDK_START_DELAY="${M3TD_PSDK_START_DELAY:-2}"
+M3E_START_PROFILE="${M3E_START_PROFILE:-soft_recycle}"
+M3E_INIT_MAX_ATTEMPTS="${M3E_INIT_MAX_ATTEMPTS:-}"
+M3E_PREP_UART="${M3E_PREP_UART:-1}"
+M3E_WATCH_TIMEOUT="${M3E_WATCH_TIMEOUT:-}"
+M3E_CARRIER_WAIT_POLLS="${M3E_CARRIER_WAIT_POLLS:-20}"
+M3E_SOFT_RECYCLE_DELAYS="${M3E_SOFT_RECYCLE_DELAYS:-0 3 2 4 1 5}"
+M3E_CARRIER_READY_DELAYS="${M3E_CARRIER_READY_DELAYS:-3 2 4 1 5 0}"
+M3E_LATE_CARRIER_WAIT_POLLS="${M3E_LATE_CARRIER_WAIT_POLLS:-24}"
+M3E_SOFT_RECYCLE_REBUILD_INTERVAL="${M3E_SOFT_RECYCLE_REBUILD_INTERVAL:-5}"
+PSDK_DEBUG="${PSDK_DEBUG:-0}"
+PSDK_INTERNAL_LOG_LEVEL="${PSDK_INTERNAL_LOG_LEVEL:-info}"
 
 # 读取型号配置: M3E / M3T → RNDIS 模式; M3TD → USB Bulk FunctionFS 模式 [默认]
 MODEL_FILE="$PSDK_DIR/drone_model"
@@ -56,6 +67,43 @@ timestamp() {
 
 log() {
     echo "[$(timestamp)] $*"
+}
+
+read_binary_build_info() {
+    local info
+
+    if ! info=$("$PSDK_BIN" --build-info 2>/dev/null); then
+        log "WARN: failed to query $PSDK_BIN --build-info; skipping model consistency check"
+        return 1
+    fi
+
+    BIN_MODEL=$(printf '%s\n' "$info" | awk -F= '/^model=/{print $2}')
+    BIN_TRANSPORT=$(printf '%s\n' "$info" | awk -F= '/^transport=/{print $2}')
+    BIN_PLATFORM=$(printf '%s\n' "$info" | awk -F= '/^platform=/{print $2}')
+    return 0
+}
+
+validate_model_consistency() {
+    BIN_MODEL=""
+    BIN_TRANSPORT=""
+    BIN_PLATFORM=""
+
+    if ! read_binary_build_info; then
+        return 0
+    fi
+
+    log "binary build info: model=${BIN_MODEL:-unknown} transport=${BIN_TRANSPORT:-unknown} platform=${BIN_PLATFORM:-unknown}"
+
+    if [ -z "${BIN_MODEL:-}" ]; then
+        log "WARN: binary build info missing model; skipping model consistency check"
+        return 0
+    fi
+
+    if [ "$BIN_MODEL" != "$DRONE_MODEL" ]; then
+        log "ERROR: drone_model=$DRONE_MODEL but psdkd was built for $BIN_MODEL ($BIN_TRANSPORT)"
+        log "ERROR: rebuild with: make clean && make -j2 PSDK_REAL=1 PLATFORM=orangepi DRONE_MODEL=$DRONE_MODEL"
+        return 1
+    fi
 }
 
 ensure_configfs() {
@@ -279,6 +327,55 @@ wait_for_carrier() {
     return 1
 }
 
+usb0_has_carrier() {
+    [ "$(cat /sys/class/net/usb0/carrier 2>/dev/null || echo 0)" = "1" ]
+}
+
+wait_for_m3e_carrier() {
+    local i
+
+    if [ "$DRONE_MODEL" != "M3E" ]; then
+        return 0
+    fi
+
+    log "waiting for M3E usb0 carrier before psdkd start (up to $((M3E_CARRIER_WAIT_POLLS / 2))s)"
+    for i in $(seq 1 "$M3E_CARRIER_WAIT_POLLS"); do
+        if [ "$(cat /sys/class/net/usb0/carrier 2>/dev/null || echo 0)" = "1" ]; then
+            log "M3E usb0 carrier detected on poll $i/$M3E_CARRIER_WAIT_POLLS"
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    log "M3E usb0 carrier did not appear in time"
+    return 1
+}
+
+wait_for_m3e_late_carrier() {
+    local i
+
+    if [ "$DRONE_MODEL" != "M3E" ]; then
+        return 0
+    fi
+
+    if usb0_has_carrier; then
+        log "M3E usb0 carrier already up after psdkd failure"
+        return 0
+    fi
+
+    log "waiting for late M3E usb0 carrier after psdkd failure (up to $((M3E_LATE_CARRIER_WAIT_POLLS / 2))s)"
+    for i in $(seq 1 "$M3E_LATE_CARRIER_WAIT_POLLS"); do
+        if usb0_has_carrier; then
+            log "late M3E usb0 carrier detected on poll $i/$M3E_LATE_CARRIER_WAIT_POLLS"
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    log "late M3E usb0 carrier did not appear in time"
+    return 1
+}
+
 setup_m3td_udc() {
     local FFS_INIT="$PSDK_DIR/tools/ffs_init"
     local FFS_PATH=/dev/usb-ffs/bulk1
@@ -353,14 +450,70 @@ prepare_usb0() {
     ip addr show usb0 | sed 's/^/    /'
 }
 
+prepare_m3e_uart() {
+    local prep_script="$PSDK_DIR/tools/prepare_uart.py"
+
+    if [ "$DRONE_MODEL" != "M3E" ] || [ "$M3E_PREP_UART" != "1" ]; then
+        return 0
+    fi
+
+    if [ ! -f "$prep_script" ]; then
+        log "WARN: missing UART prep helper: $prep_script"
+        return 0
+    fi
+
+    if python3 "$prep_script" /dev/ttyUSB0 >>"$BOOT_LOG" 2>&1; then
+        log "[4] M3E UART preconditioned"
+    else
+        log "WARN: M3E UART precondition helper failed"
+    fi
+}
+
+should_rebuild_gadget_for_cycle() {
+    local cycle=$1
+
+    if [ "$DRONE_MODEL" != "M3E" ] || [ "$M3E_START_PROFILE" != "soft_recycle" ]; then
+        return 0
+    fi
+
+    if [ "$cycle" -le 1 ]; then
+        return 0
+    fi
+
+    if [ "$M3E_SOFT_RECYCLE_REBUILD_INTERVAL" -le 1 ]; then
+        return 0
+    fi
+
+    if [ $(( (cycle - 1) % M3E_SOFT_RECYCLE_REBUILD_INTERVAL )) -eq 0 ]; then
+        return 0
+    fi
+
+    return 1
+}
+
 start_and_watch() {
     local pid
     local elapsed
     local start_delay=$1
+    local init_max_attempts_env=()
+    local watch_timeout=$NEGOTIATE_TIMEOUT
+    local psdk_argv=()
 
     if [ "$DRONE_MODEL" = "M3TD" ] && [ "$M3TD_USB_PROFILE" = "manifold3" ] && \
        [ "$start_delay" -lt "$M3TD_PSDK_START_DELAY" ]; then
         start_delay=$M3TD_PSDK_START_DELAY
+    fi
+
+    if [ "$DRONE_MODEL" = "M3E" ] && [ -n "$M3E_INIT_MAX_ATTEMPTS" ]; then
+        init_max_attempts_env=("PSDK_INIT_MAX_ATTEMPTS=$M3E_INIT_MAX_ATTEMPTS")
+    fi
+
+    if [ "$DRONE_MODEL" = "M3E" ] && [ -n "$M3E_WATCH_TIMEOUT" ]; then
+        watch_timeout=$M3E_WATCH_TIMEOUT
+    fi
+
+    if [ "$PSDK_DEBUG" = "1" ]; then
+        psdk_argv+=(--debug)
     fi
 
     : > "$ATTEMPT_LOG"
@@ -368,11 +521,18 @@ start_and_watch() {
         log "[5] delaying psdkd start by ${start_delay}s"
         sleep "$start_delay"
     fi
-    stdbuf -oL -eL "$PSDK_BIN" --debug >>"$ATTEMPT_LOG" 2>&1 &
+    env "${init_max_attempts_env[@]}" "PSDK_INTERNAL_LOG_LEVEL=$PSDK_INTERNAL_LOG_LEVEL" \
+        stdbuf -oL -eL "$PSDK_BIN" "${psdk_argv[@]}" >>"$ATTEMPT_LOG" 2>&1 &
     pid=$!
-    log "[5] started psdkd pid=$pid"
+    if [ "${#init_max_attempts_env[@]}" -gt 0 ]; then
+        log "[5] started psdkd pid=$pid (${init_max_attempts_env[0]} PSDK_INTERNAL_LOG_LEVEL=$PSDK_INTERNAL_LOG_LEVEL debug=$PSDK_DEBUG)"
+    else
+        log "[5] started psdkd pid=$pid (PSDK_INTERNAL_LOG_LEVEL=$PSDK_INTERNAL_LOG_LEVEL debug=$PSDK_DEBUG)"
+    fi
 
-    for elapsed in $(seq 1 "$NEGOTIATE_TIMEOUT"); do
+    elapsed=0
+    while true; do
+        elapsed=$((elapsed + 1))
         if ! kill -0 "$pid" 2>/dev/null; then
             log "psdkd exited before startup completed"
             tail -n 80 "$ATTEMPT_LOG" | sed 's/^/    /'
@@ -394,10 +554,14 @@ start_and_watch() {
             return $?
         fi
 
+        if [ "$watch_timeout" -gt 0 ] && [ "$elapsed" -ge "$watch_timeout" ]; then
+            break
+        fi
+
         sleep 1
     done
 
-    log "startup timed out after ${NEGOTIATE_TIMEOUT}s"
+    log "startup timed out after ${watch_timeout}s"
     tail -n 80 "$ATTEMPT_LOG" | sed 's/^/    /'
     kill "$pid" 2>/dev/null || true
     sleep 1
@@ -410,9 +574,48 @@ main() {
     local cycle
     local start_delay
     local effective_start_delays="$START_DELAYS"
+    local cycle_start_delays
+    local m3e_carrier_ready=0
 
     : > "$BOOT_LOG"
     log "=== PSDK startup (model=$DRONE_MODEL) ===" | tee -a "$BOOT_LOG"
+
+    if ! validate_model_consistency | tee -a "$BOOT_LOG"; then
+        exit 1
+    fi
+
+    if [ "$DRONE_MODEL" = "M3E" ]; then
+        if [ "$M3E_START_PROFILE" = "delay_sweep" ]; then
+            if [ -z "$M3E_INIT_MAX_ATTEMPTS" ]; then
+                M3E_INIT_MAX_ATTEMPTS=2
+            fi
+            if [ "$START_DELAYS" = "0 2 4" ]; then
+                effective_start_delays="0 1 2 3 4"
+            fi
+            log "M3E startup profile: delay_sweep; start delays: $effective_start_delays; PSDK_INIT_MAX_ATTEMPTS=$M3E_INIT_MAX_ATTEMPTS" | tee -a "$BOOT_LOG"
+        elif [ "$M3E_START_PROFILE" = "hold_power" ]; then
+            effective_start_delays="0"
+            if [ -z "$M3E_INIT_MAX_ATTEMPTS" ]; then
+                M3E_INIT_MAX_ATTEMPTS=0
+            fi
+            if [ -z "$M3E_WATCH_TIMEOUT" ]; then
+                M3E_WATCH_TIMEOUT=0
+            fi
+            log "M3E startup profile: hold_power; start delays: $effective_start_delays; PSDK_INIT_MAX_ATTEMPTS=$M3E_INIT_MAX_ATTEMPTS; watch_timeout=${M3E_WATCH_TIMEOUT:-0}" | tee -a "$BOOT_LOG"
+        else
+            effective_start_delays="0"
+            if [ -z "$M3E_INIT_MAX_ATTEMPTS" ]; then
+                M3E_INIT_MAX_ATTEMPTS=1
+            fi
+            if [ "$START_DELAYS" = "0 2 4" ]; then
+                effective_start_delays="$M3E_SOFT_RECYCLE_DELAYS"
+            fi
+            if [ -z "$M3E_WATCH_TIMEOUT" ]; then
+                M3E_WATCH_TIMEOUT=0
+            fi
+            log "M3E startup profile: soft_recycle; start delays: $effective_start_delays; PSDK_INIT_MAX_ATTEMPTS=$M3E_INIT_MAX_ATTEMPTS; watch_timeout=${M3E_WATCH_TIMEOUT:-0}" | tee -a "$BOOT_LOG"
+        fi
+    fi
 
     if [ "$DRONE_MODEL" = "M3TD" ] && [ "$M3TD_USB_PROFILE" = "manifold3" ]; then
         effective_start_delays="2 4"
@@ -424,9 +627,13 @@ main() {
         cycle=$((cycle + 1))
         log "===== startup cycle $cycle =====" | tee -a "$BOOT_LOG"
 
-        # 每个 cycle 开始时完整重建 gadget（首次或上一 cycle 彻底失败后）
         cleanup_processes
-        rebuild_gadget
+        if should_rebuild_gadget_for_cycle "$cycle"; then
+            log "rebuilding gadget for cycle $cycle" | tee -a "$BOOT_LOG"
+            rebuild_gadget
+        else
+            log "reusing existing gadget for cycle $cycle (M3E soft_recycle interval=$M3E_SOFT_RECYCLE_REBUILD_INTERVAL)" | tee -a "$BOOT_LOG"
+        fi
 
         if [ "$DRONE_MODEL" = "M3TD" ]; then
             if ! setup_m3td_udc; then
@@ -442,16 +649,36 @@ main() {
                 continue
             fi
             prepare_usb0
+            prepare_m3e_uart
+            if [ "$DRONE_MODEL" = "M3E" ] && usb0_has_carrier; then
+                m3e_carrier_ready=1
+            else
+                m3e_carrier_ready=0
+            fi
             wait_for_carrier >>"$BOOT_LOG" 2>&1 &
         fi
 
         # inner retry: 只重启 psdkd，不重建 gadget，保持 E-Port 通信不中断
-        for start_delay in $effective_start_delays; do
+        cycle_start_delays="$effective_start_delays"
+        if [ "$DRONE_MODEL" = "M3E" ] && [ "$M3E_START_PROFILE" = "soft_recycle" ] && [ "$m3e_carrier_ready" = "1" ]; then
+            cycle_start_delays="$M3E_CARRIER_READY_DELAYS"
+            log "M3E carrier is already up; preferring start delays: $cycle_start_delays" | tee -a "$BOOT_LOG"
+        fi
+
+        for start_delay in $cycle_start_delays; do
             log "----- cycle $cycle delay=${start_delay}s -----" | tee -a "$BOOT_LOG"
             cleanup_processes
 
             if start_and_watch "$start_delay" | tee -a "$BOOT_LOG"; then
                 return 0
+            fi
+
+            if [ "$DRONE_MODEL" = "M3E" ] && [ "$M3E_START_PROFILE" = "soft_recycle" ]; then
+                if ! wait_for_m3e_late_carrier | tee -a "$BOOT_LOG"; then
+                    log "cycle $cycle delay=${start_delay}s failed without late carrier; rebuilding gadget" | tee -a "$BOOT_LOG"
+                    break
+                fi
+                m3e_carrier_ready=1
             fi
 
             log "cycle $cycle delay=${start_delay}s failed; retrying psdkd without gadget rebuild" | tee -a "$BOOT_LOG"

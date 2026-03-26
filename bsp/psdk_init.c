@@ -25,9 +25,55 @@
 #ifdef PSDK_REAL
 
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <dji_core.h>
 #include "dji_sdk_app_info.h"   /* fill in your credentials here */
+
+static const char *psdk_init_rc_name(T_DjiReturnCode rc) {
+    switch (rc) {
+        case DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS:
+            return "success";
+        case 0x000000E1:
+            return "payload_negotiate_timeout";
+        case 0x000000E3:
+            return "app_auth_verify_failed";
+        case 0x000000FF:
+            return "payload_remove_device_sync_error";
+        default:
+            return "unknown";
+    }
+}
+
+static int psdk_init_max_attempts_default(void) {
+#ifdef DRONE_MODEL_M3E
+    return 0;
+#else
+    return 30;
+#endif
+}
+
+static int psdk_init_max_attempts_from_env(void) {
+    const char *value = getenv("PSDK_INIT_MAX_ATTEMPTS");
+    char *end = NULL;
+    long parsed;
+
+    if (value == NULL || *value == '\0')
+        return psdk_init_max_attempts_default();
+
+    parsed = strtol(value, &end, 10);
+    if (end == value || *end != '\0') {
+        log_warn(TAG, "invalid PSDK_INIT_MAX_ATTEMPTS=%s, using default", value);
+        return psdk_init_max_attempts_default();
+    }
+
+    if (parsed < 0)
+        parsed = 0;
+    if (parsed > 100000)
+        parsed = 100000;
+    return (int)parsed;
+}
 
 int psdk_init(void) {
     /* Step 1: register platform handlers */
@@ -56,19 +102,45 @@ int psdk_init(void) {
      * from triggering its power-cut timeout between retries. */
     T_DjiReturnCode rc;
     int attempt = 0;
+    int max_init_attempts = psdk_init_max_attempts_from_env();
+    struct timespec init_started = {0};
+    struct timespec init_finished = {0};
+
+    if (max_init_attempts == 0) {
+        log_info(TAG, "DjiCore_Init retry policy: unlimited attempts (keep link active)");
+    } else {
+        log_info(TAG, "DjiCore_Init retry policy: max %d attempts", max_init_attempts);
+    }
+
     do {
         if (attempt > 0) {
-            log_warn(TAG, "DjiCore_Init attempt %d failed (0x%08X), retrying in 1s...",
-                     attempt, rc);
+            log_warn(TAG,
+                     "DjiCore_Init attempt %d failed (%s, 0x%08X), retrying in 1s...",
+                     attempt, psdk_init_rc_name(rc), rc);
             DjiCore_DeInit();
             sleep(1);
         }
+        clock_gettime(CLOCK_MONOTONIC, &init_started);
         rc = DjiCore_Init(&user_info);
+        clock_gettime(CLOCK_MONOTONIC, &init_finished);
         attempt++;
-    } while (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS && attempt < 30);
+        log_info(TAG,
+                 "DjiCore_Init attempt %d finished in %lld ms with %s (0x%08X)",
+                 attempt,
+                 (long long)((init_finished.tv_sec - init_started.tv_sec) * 1000LL +
+                             (init_finished.tv_nsec - init_started.tv_nsec) / 1000000LL),
+                 psdk_init_rc_name(rc), rc);
+    } while (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS &&
+             (max_init_attempts == 0 || attempt < max_init_attempts));
 
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
-        log_error(TAG, "DjiCore_Init failed after %d attempts (0x%08X)", attempt, rc);
+        if (max_init_attempts == 0) {
+            log_error(TAG, "DjiCore_Init stopped after %d attempts (%s, 0x%08X)",
+                      attempt, psdk_init_rc_name(rc), rc);
+        } else {
+            log_error(TAG, "DjiCore_Init failed after %d/%d attempts (%s, 0x%08X)",
+                      attempt, max_init_attempts, psdk_init_rc_name(rc), rc);
+        }
         psdk_hal_usb_bulk_release();
         return -1;
     }

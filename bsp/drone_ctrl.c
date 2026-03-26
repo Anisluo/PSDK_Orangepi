@@ -220,6 +220,8 @@ static T_DjiReturnCode cb_gimbal(const uint8_t *data, uint16_t len,
 /* ── Init / deinit ────────────────────────────────────────────────────────── */
 int drone_ctrl_init(void) {
     T_DjiReturnCode rc;
+    bool battery_topic_ok = false;
+    bool gimbal_topic_ok = false;
 
     rc = DjiFcSubscription_Init();
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
@@ -243,15 +245,35 @@ int drone_ctrl_init(void) {
               cb_gps, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ);
     SUBSCRIBE(DJI_FC_SUBSCRIPTION_TOPIC_STATUS_FLIGHT,
               cb_flight_status, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ);
-    SUBSCRIBE(DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_INFO,
-              cb_battery, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ);
+    rc = DjiFcSubscription_SubscribeTopic(DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_INFO,
+                                          DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ,
+                                          cb_battery);
+    if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        log_warn(TAG, "subscribe DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_INFO failed (0x%08X)", rc);
+    } else {
+        battery_topic_ok = true;
+    }
     SUBSCRIBE(DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_SINGLE_INFO_INDEX1,
               cb_battery_single_1, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ);
     SUBSCRIBE(DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_SINGLE_INFO_INDEX2,
               cb_battery_single_2, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ);
-    SUBSCRIBE(DJI_FC_SUBSCRIPTION_TOPIC_GIMBAL_ANGLES,
-              cb_gimbal, DJI_DATA_SUBSCRIPTION_TOPIC_10_HZ);
+    rc = DjiFcSubscription_SubscribeTopic(DJI_FC_SUBSCRIPTION_TOPIC_GIMBAL_ANGLES,
+                                          DJI_DATA_SUBSCRIPTION_TOPIC_10_HZ,
+                                          cb_gimbal);
+    if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        log_warn(TAG, "subscribe DJI_FC_SUBSCRIPTION_TOPIC_GIMBAL_ANGLES failed (0x%08X)", rc);
+    } else {
+        gimbal_topic_ok = true;
+    }
 #undef SUBSCRIBE
+
+    if (!battery_topic_ok) {
+        log_info(TAG, "battery telemetry will fall back to single-battery topics when whole-pack topic is unavailable");
+    }
+
+    if (!gimbal_topic_ok) {
+        log_info(TAG, "gimbal angle topic may be unavailable on this aircraft; getter will return cached/default values");
+    }
 
     rc = DjiCameraManager_Init();
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS)

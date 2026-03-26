@@ -31,6 +31,18 @@
 
 #define TAG "app.main"
 
+#ifndef BUILD_DRONE_MODEL
+#define BUILD_DRONE_MODEL "stub"
+#endif
+
+#ifndef BUILD_CONN_MODE
+#define BUILD_CONN_MODE "stub"
+#endif
+
+#ifndef BUILD_PLATFORM
+#define BUILD_PLATFORM "unknown"
+#endif
+
 static volatile int g_running = 1;
 
 static void sig_handler(int sig) {
@@ -44,6 +56,7 @@ static void usage(const char *prog) {
         "  --port     <N>    UDP listen port       (default %d)\n"
         "  --bind-ip  <IP>   IP address to bind to (default 0.0.0.0)\n"
         "  --debug           Enable debug log level\n"
+        "  --build-info      Print build metadata and exit\n"
         "  --help            Show this help\n",
         prog, DRONE_SERVER_PORT);
 }
@@ -52,6 +65,7 @@ int main(int argc, char *argv[]) {
     uint16_t    port    = DRONE_SERVER_PORT;
     const char *bind_ip = "0.0.0.0";
     int         debug   = 0;
+    int         build_info = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) {
@@ -60,6 +74,8 @@ int main(int argc, char *argv[]) {
             bind_ip = argv[++i];
         } else if (!strcmp(argv[i], "--debug")) {
             debug = 1;
+        } else if (!strcmp(argv[i], "--build-info")) {
+            build_info = 1;
         } else if (!strcmp(argv[i], "--help")) {
             usage(argv[0]);
             return 0;
@@ -70,9 +86,16 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    if (build_info) {
+        printf("model=%s\ntransport=%s\nplatform=%s\n",
+               BUILD_DRONE_MODEL, BUILD_CONN_MODE, BUILD_PLATFORM);
+        return 0;
+    }
+
     log_set_level(debug ? LOG_DEBUG : LOG_INFO);
-    log_info(TAG, "psdkd starting (bind=%s port=%u debug=%d)",
-             bind_ip, port, debug);
+    log_info(TAG,
+             "psdkd starting (bind=%s port=%u debug=%d model=%s transport=%s platform=%s)",
+             bind_ip, port, debug, BUILD_DRONE_MODEL, BUILD_CONN_MODE, BUILD_PLATFORM);
 
     /* ── Signal handling ──────────────────────────────────────────────────── */
     struct sigaction sa = { .sa_handler = sig_handler };
