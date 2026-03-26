@@ -119,6 +119,7 @@ ifdef PSDK_REAL
   CFLAGS += \
       -DPSDK_REAL \
       $(DRONE_CONN_FLAG) \
+      -DDRONE_MODEL_$(DRONE_MODEL) \
       -DLINUX_UART_DEV1=\"$(DRONE_UART_DEV)\" \
       -DLINUX_NETWORK_DEV=\"$(EPORT_NETDEV)\" \
       -I$(PSDK_INC_DIR) \

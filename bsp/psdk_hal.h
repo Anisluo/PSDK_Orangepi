@@ -14,8 +14,7 @@
  *
  * E-port wiring on OrangePi Zero3:
  *   - UART TX/RX via USB-UART bridge or direct 3.3V UART
- *   - Recommended: /dev/ttyUSB0 @ 921600 baud for M3TD dual-link negotiation
- *   - Or USB bulk via /dev/usb-DJI (if using SKYPORT v2 USB mode)
+ *   - M3E/M3T/M3TD : /dev/ttyUSB0 @ 921600 baud
  */
 
 /* Keep log output aligned with the actual UART device passed from the build. */

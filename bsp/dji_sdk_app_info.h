@@ -27,7 +27,7 @@ extern "C" {
 #define USER_APP_LICENSE        "P0rYPnomRTA6aVK8Qp53G3saZlEmnlkGjvYzML2ieUmAARvvnXeiBtut8xHt40snA5TxoHL+TNB7ZHNPSlfFayCRDcvaMf5rJ5ce7SmFRGWrY+QGRPTUmnxoARcDfUhnmrmEQezQU91BWA94hWVj6GCrN2kMAZjRNiYJPgE8+Pj0A5qzvGIUp5ssXbNmNERl/p7TLwd4S7Ln8MkhcLhTScjrVgz5EsYFz0RU6WrCy95wNK33nEaDhfHDBZ/Iu55tTObqPOe3FTb+xDQ1DyYEkYVwIQnlbLHXUGdqeji1AndKZ4wltcEaXBIA9JiJ/Hj4Ij3bloKzpS9C3Z3PMLKYJA=="
 #define USER_DEVELOPER_ACCOUNT  "2010057290@qq.com"
 
-/* Baud rate for E-Port UART. M3TD dual-link negotiation switches to 921600. */
+/* Baud rate for E-Port UART. M3E/M3T/M3TD all use 921600. */
 #define USER_BAUD_RATE          "921600"
 
 #ifdef __cplusplus

@@ -261,6 +261,41 @@
 
 ---
 
+## 2024-09-12 调试新增结论（OrangePi @ 192.168.1.103）
+
+### 已解决的问题
+
+1. **E-Port 15s 断电问题 — 已修复**
+   - 根本原因：inner retry 时 `rebuild_gadget` 会把 `usb0` 断掉重建，导致 E-Port 通信中断，触发 15s 超时断电
+   - 修复：[tools/start_dual.sh](tools/start_dual.sh) 改为 inner retry 只重启 `psdkd`，不重建 gadget
+   - 验证：OrangePi 全程未断电，`psdkd` 持续重试直到成功
+
+2. **bsp/psdk_init.c 内部重试 — 已添加**
+   - 原来 `DjiCore_Init` 失败一次就返回 -1，外层 `start_dual.sh` 负责重试（要重建 gadget）
+   - 现在 `DjiCore_Init` 内部最多重试 30 次，每次间隔 1s
+   - 好处：UART 保持打开状态，E-Port 通信不中断
+
+3. **新机部署脚本 — 已创建**
+   - [tools/push_deps_and_deploy_m3e.sh](tools/push_deps_and_deploy_m3e.sh)
+   - 全自动：推 arm64 依赖 → rsync 代码 → rsync SDK → 远端编译 → 配置自启动
+
+4. **波特率确认：921600（非 460800）**
+   - 曾误改为 460800，导致 SDK 与飞机协商失败（0xFF 错误增多）
+   - 已回滚到 921600，SDK 自动扫描波特率逻辑正常
+
+### 当前未解决的问题
+
+1. **CH340 在 921600 baud 下 CRC 错误率高**
+   - 导致 DjiCore_Init 握手失败率仍然偏高（尤其是今天多次反复重启后飞机状态混乱）
+   - 根本解决：换 FTDI 芯片；次选：启用 OrangePi 原生 ttyS5（需设备树 overlay）
+   - 当前：只能靠重试等成功
+
+2. **今日测试后飞机 PSDK 栈状态混乱**
+   - 反复拔插 + 多次 DjiCore_Init/DeInit 后，飞机侧 UART 握手状态异常
+   - 需要完整冷启动（断电 15s 以上）才能恢复
+
+---
+
 ## 下一步最值得做的事
 
 1. **继续提升启动稳定性**
